@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.env
+.env.local
+state.json
+*.sieve.bin
+
+# IDE
+.idea/
+.vscode/
