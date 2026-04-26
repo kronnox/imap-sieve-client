@@ -1,10 +1,11 @@
 //! Integration tests against a Dovecot server. Skipped unless
 //! `DOVECOT_TEST_HOST` is set.
 
+use async_trait::async_trait;
+use config::ImapTlsMode;
 use imap_sieve_core::imap_client::{AsyncImapClient, ImapClient};
 use imap_sieve_core::smtp_sender::{MailSender, OutgoingMail};
 use imap_sieve_core::types::CoreError;
-use async_trait::async_trait;
 
 /// A no-op mail sender for integration tests that don't need SMTP.
 struct NopMailSender;
@@ -31,9 +32,10 @@ async fn login_and_select_inbox() {
     let Some((host, port)) = dovecot_host() else {
         return;
     };
-    let mut client = AsyncImapClient::connect(&host, port, "testuser", "testpass", false)
-        .await
-        .expect("connect");
+    let mut client =
+        AsyncImapClient::connect(&host, port, "testuser", "testpass", &ImapTlsMode::Plain)
+            .await
+            .expect("connect");
     let caps = client.capabilities().await.expect("capabilities");
     assert!(caps.idle, "Dovecot should advertise IDLE");
     let status = client.select("INBOX").await.expect("select");
@@ -54,9 +56,10 @@ async fn fileinto_action_moves_message() {
     };
 
     // 1. Append a test message via a fresh client
-    let mut client = AsyncImapClient::connect(&host, port, "testuser", "testpass", false)
-        .await
-        .unwrap();
+    let mut client =
+        AsyncImapClient::connect(&host, port, "testuser", "testpass", &ImapTlsMode::Plain)
+            .await
+            .unwrap();
     // Ensure the Junk folder exists (ignore error if it already does):
     let _ = client.session_create_mailbox("Junk").await;
     let test_msg = b"From: a@b.com\r\nTo: c@d.com\r\nSubject: integration spam\r\n\r\nbody\r\n";
@@ -80,6 +83,10 @@ async fn fileinto_action_moves_message() {
         .update(|s| {
             s.uidvalidity = Some(status.uidvalidity);
             s.selected_mailbox = Some("INBOX".into());
+            // Seed last_seen_uid to UIDNEXT-1 so the processor fetches
+            // only messages appended after the SELECT (including the one
+            // we just appended).
+            s.last_seen_uid = Some(status.uidnext.saturating_sub(1));
         })
         .unwrap();
 
@@ -92,6 +99,7 @@ async fn fileinto_action_moves_message() {
         caps: &caps,
         state: &mut state,
         mailbox: "INBOX",
+        batch_size: 100,
     };
     let results = processor.run_batch().await.unwrap();
     assert!(results

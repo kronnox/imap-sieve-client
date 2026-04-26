@@ -11,15 +11,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-/// Exit code returned when UIDVALIDITY changes — signals a fatal
-/// condition that should *not* be auto-restarted by a supervisor like
-/// systemd without operator intervention.
+/// Exit code for a UIDVALIDITY mismatch — fatal condition that requires
+/// operator intervention. Configure `RestartPreventExitStatus=2` in the
+/// systemd unit to prevent automatic restart.
 const EXIT_UIDVALIDITY: i32 = 2;
 
 pub async fn run(config_path: &Path) -> Result<()> {
     let cfg = Config::load(config_path).context("loading config")?;
-    init_tracing(&cfg.logging.level);
+    init_tracing(&cfg.logging.level, cfg.logging.file.as_ref());
 
+    // Two engine instances: one for the runtime, one for ScriptLoader.
+    // ScriptLoader needs its own engine because it compiles bytecode from a
+    // separate Compiler instance; compiled bytecode is portable across Runtime
+    // instances in sieve-rs, so the loader's engine is discarded after loading.
     let engine = SieveEngineImpl::new();
     let (loader, script) = ScriptLoader::load(SieveEngineImpl::new(), &cfg.sieve.script_path)
         .context("loading sieve script")?;
@@ -60,6 +64,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
             jitter: cfg.daemon.reconnect_jitter,
         },
         idle_timeout: IDLE_TIMEOUT,
+        batch_size: cfg.daemon.batch_size,
         shutdown,
     };
 
@@ -81,7 +86,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
 }
 
 pub async fn stop(_config_path: &Path) -> Result<()> {
-    anyhow::bail!("`stop` subcommand requires a PID file integration; not yet implemented")
+    anyhow::bail!("`stop` subcommand is not yet implemented; send SIGTERM to the daemon process instead, or use Ctrl+C if running in the foreground")
 }
 
 pub async fn status(config_path: &Path) -> Result<()> {
@@ -164,9 +169,29 @@ fn state_path(cfg: &Config) -> Result<PathBuf> {
     Ok(base.join("imap-sieve").join("state.json"))
 }
 
-fn init_tracing(level: &str) {
+fn init_tracing(level: &str, log_file: Option<&PathBuf>) {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    if let Some(path) = log_file {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(file) => {
+                fmt().with_env_filter(filter).with_writer(file).init();
+                return;
+            }
+            Err(e) => {
+                // No subscriber registered yet — tracing::warn! would be
+                // silently dropped. Use eprintln! so the operator sees it.
+                eprintln!(
+                    "warning: could not open log file {}: {e}; falling back to stderr",
+                    path.display()
+                );
+            }
+        }
+    }
     fmt().with_env_filter(filter).init();
 }
 
@@ -211,16 +236,21 @@ impl AsyncImapFactory {
 impl ConnectionFactory for AsyncImapFactory {
     type Client = AsyncImapClient;
     async fn connect(&self) -> Result<Self::Client, CoreError> {
-        let password = self
-            .cfg
-            .resolve_password()
-            .map_err(|e| CoreError::Imap(format!("password: {e}")))?;
+        // resolve_password may invoke a password_command (blocking subprocess).
+        // Run it on a blocking thread to avoid stalling the tokio runtime.
+        let password = tokio::task::spawn_blocking({
+            let cfg = self.cfg.clone();
+            move || cfg.resolve_password()
+        })
+        .await
+        .map_err(|e| CoreError::Imap(format!("spawn_blocking: {e}")))?
+        .map_err(|e| CoreError::Imap(format!("password: {e}")))?;
         AsyncImapClient::connect(
             &self.cfg.host,
             self.cfg.port,
             &self.cfg.username,
             &password,
-            self.cfg.tls,
+            &self.cfg.tls_mode,
         )
         .await
     }

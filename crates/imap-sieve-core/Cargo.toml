@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-imap = { workspace = true }
+imap-proto = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
@@ -25,10 +26,12 @@ sieve-rs = { workspace = true }
 lettre = { workspace = true }
 notify = { workspace = true }
 rand = { workspace = true }
-chrono = { workspace = true }
 tempfile = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+config = { workspace = true }

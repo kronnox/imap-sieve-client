@@ -10,6 +10,9 @@ pub struct MessageContext {
     pub mailbox: String,
     /// Header name → value (lowercased keys). Multi-valued headers are
     /// concatenated with `, ` (per Sieve "header" test semantics).
+    ///
+    /// Note: sieve-rs parses headers from `raw` directly; this field is for
+    /// consumer inspection (e.g. `test-rule` output) only.
     pub headers: BTreeMap<String, String>,
     /// Envelope sender (MAIL FROM). Often unavailable from IMAP — `None` if
     /// the server did not provide it.
@@ -39,6 +42,7 @@ pub enum SieveAction {
     FileInto {
         mailbox: String,
         copy: bool,
+        create: bool,
     },
     Redirect {
         addresses: Vec<String>,
@@ -100,6 +104,10 @@ pub enum CoreError {
 /// Lowercases header names and concatenates duplicate headers with `, `
 /// (per Sieve "header" test semantics). Handles RFC 5322 header field
 /// folding (continuation lines starting with whitespace).
+///
+/// The initial `\n` in the first pass is intentional: it ensures the
+/// first header line is parsed correctly by `split_once(':')` in the
+/// second pass, even though the input doesn't start with a newline.
 pub fn parse_headers(raw: &[u8]) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::new();
     let text = String::from_utf8_lossy(raw);
@@ -189,6 +197,35 @@ mod tests {
     fn parse_headers_unfolds_continuation() {
         let raw = b"Subject: this is\r\n a folded\r\n header\r\n\r\n";
         let h = parse_headers(raw);
-        assert_eq!(h.get("subject"), Some(&"this is a folded header".to_string()));
+        assert_eq!(
+            h.get("subject"),
+            Some(&"this is a folded header".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_headers_return_path_preserves_brackets() {
+        let raw = b"Return-Path: <user@example.com>\r\nFrom: a@b.com\r\n\r\n";
+        let h = parse_headers(raw);
+        // parse_headers returns the raw RFC 5321 reverse-path including angle
+        // brackets. Consumers (imap_client::fetch_uid_range) strip them.
+        assert_eq!(
+            h.get("return-path"),
+            Some(&"<user@example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_return_path_angle_brackets() {
+        fn strip_brackets(s: &str) -> &str {
+            let s = s.trim();
+            s.strip_prefix('<')
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(s)
+        }
+        assert_eq!(strip_brackets("<user@example.com>"), "user@example.com");
+        assert_eq!(strip_brackets("user@example.com"), "user@example.com");
+        assert_eq!(strip_brackets(" <>"), "");
+        assert_eq!(strip_brackets("<>"), "");
     }
 }

@@ -118,7 +118,10 @@ impl SieveEngine for SieveEngineImpl {
                     // Include not supported — skip and continue.
                     Input::True
                 }
-                Event::Keep { .. } => {
+                Event::Keep { flags, .. } => {
+                    if !flags.is_empty() {
+                        actions.push(SieveAction::SetFlag { flags });
+                    }
                     actions.push(SieveAction::Keep);
                     Input::True
                 }
@@ -126,21 +129,33 @@ impl SieveEngine for SieveEngineImpl {
                     actions.push(SieveAction::Discard);
                     Input::True
                 }
-                Event::FileInto { folder, create, .. } => {
+                Event::FileInto {
+                    folder,
+                    flags,
+                    create,
+                    ..
+                } => {
+                    if !flags.is_empty() {
+                        actions.push(SieveAction::SetFlag { flags });
+                    }
                     actions.push(SieveAction::FileInto {
                         mailbox: folder,
-                        copy: create,
+                        copy: false, // :copy is handled by sieve-rs emitting Keep alongside FileInto
+                        create,
                     });
                     Input::True
                 }
                 Event::SendMessage { recipient, .. } => {
-                    let addr = match recipient {
-                        sieve::Recipient::Address(addr) => addr,
-                        _ => String::new(),
-                    };
-                    actions.push(SieveAction::Redirect {
-                        addresses: vec![addr],
-                    });
+                    match recipient {
+                        sieve::Recipient::Address(addr) => {
+                            actions.push(SieveAction::Redirect {
+                                addresses: vec![addr],
+                            });
+                        }
+                        _ => {
+                            tracing::warn!("unsupported recipient type in redirect; skipping");
+                        }
+                    }
                     Input::True
                 }
                 Event::Reject { reason, .. } => {
@@ -168,10 +183,36 @@ impl SieveEngine for SieveEngineImpl {
                     | SieveAction::Discard
                     | SieveAction::FileInto { .. }
                     | SieveAction::Redirect { .. }
+                    | SieveAction::Reject { .. }
             )
         });
         if !touched {
             actions.push(SieveAction::Keep);
+        }
+
+        // :copy detection: sieve-rs conveys `:copy` through the implicit Keep
+        // event. A non-:copy fileinto clears final_event; :copy preserves it.
+        // When both FileInto and Keep are present, every FileInto must have
+        // preserved the Keep (either via :copy or because an explicit `keep;`
+        // restored it). In both cases copy=true is correct: the message should
+        // stay in INBOX (COPY instead of MOVE). The redundant Keep is removed
+        // since the original stays via the COPY.
+        //
+        // Known limitation: if a non-:copy fileinto runs BEFORE a :copy one,
+        // the Keep is cleared and never restored — sieve-rs emits no Keep, so
+        // the :copy info is lost. This is a sieve-rs API limitation (Event::FileInto
+        // has no `copy` field). The mixed case is uncommon in practice.
+        let has_fileinto = actions
+            .iter()
+            .any(|a| matches!(a, SieveAction::FileInto { .. }));
+        let has_keep = actions.iter().any(|a| matches!(a, SieveAction::Keep));
+        if has_fileinto && has_keep {
+            for action in actions.iter_mut() {
+                if let SieveAction::FileInto { copy, .. } = action {
+                    *copy = true;
+                }
+            }
+            actions.retain(|a| !matches!(a, SieveAction::Keep));
         }
 
         Ok(actions)
@@ -248,5 +289,173 @@ if header :contains "Subject" "spam" {
         let engine = SieveEngineImpl::new();
         let err = engine.compile("this is not sieve").unwrap_err();
         assert!(matches!(err, SieveError::Compile(_)));
+    }
+
+    #[test]
+    fn fileinto_copy_sets_copy_flag() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "fileinto";
+require "copy";
+fileinto :copy "Archive";
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        // :copy produces FileInto with copy=true; the implicit Keep is stripped
+        // since copy semantics mean the original stays anyway.
+        let fileinto = actions
+            .iter()
+            .find(|a| matches!(a, SieveAction::FileInto { .. }));
+        assert!(fileinto.is_some(), "got {:?}", actions);
+        match fileinto.unwrap() {
+            SieveAction::FileInto { copy, .. } => {
+                assert!(copy, "copy should be true for :copy");
+            }
+            _ => panic!("expected FileInto"),
+        }
+        // No Keep should be present (it was stripped as redundant with copy=true).
+        assert!(
+            !actions.iter().any(|a| matches!(a, SieveAction::Keep)),
+            "got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn fileinto_create_sets_create_flag() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "fileinto";
+require "mailbox";
+fileinto :create "NewFolder";
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        let fileinto = actions
+            .iter()
+            .find(|a| matches!(a, SieveAction::FileInto { .. }));
+        assert!(fileinto.is_some(), "got {:?}", actions);
+        match fileinto.unwrap() {
+            SieveAction::FileInto { create, .. } => {
+                assert!(create, "create should be true for :create");
+            }
+            _ => panic!("expected FileInto"),
+        }
+    }
+
+    #[test]
+    fn imap4flags_set_on_keep() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "imap4flags";
+addflag "\\Seen";
+keep;
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, SieveAction::SetFlag { flags } if flags.contains(&"\\Seen".to_string()))),
+            "expected SetFlag with \\Seen, got {:?}",
+            actions
+        );
+        assert!(actions.iter().any(|a| matches!(a, SieveAction::Keep)));
+    }
+
+    #[test]
+    fn imap4flags_set_on_fileinto() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "fileinto";
+require "imap4flags";
+addflag "\\Flagged";
+fileinto "Important";
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, SieveAction::SetFlag { flags } if flags.contains(&"\\Flagged".to_string()))),
+            "expected SetFlag with \\Flagged, got {:?}",
+            actions
+        );
+        let fileinto = actions
+            .iter()
+            .find(|a| matches!(a, SieveAction::FileInto { mailbox, .. } if mailbox == "Important"));
+        assert!(fileinto.is_some(), "got {:?}", actions);
+    }
+
+    /// Known limitation: when a non-:copy fileinto runs before a :copy one,
+    /// sieve-rs clears the implicit Keep, so our heuristic cannot detect the
+    /// :copy modifier. This is a sieve-rs API limitation — Event::FileInto has
+    /// no `copy` field. Both FileInto actions get copy=false, which is wrong
+    /// for "Archive" (should be copy=true). This case is uncommon in practice.
+    #[test]
+    fn mixed_copy_fileinto_known_limitation() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "fileinto";
+require "copy";
+fileinto "Log";
+fileinto :copy "Archive";
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        // sieve-rs emits FileInto("Log") + FileInto("Archive") with NO Keep,
+        // because the non-:copy "Log" fileinto clears final_event before
+        // the :copy "Archive" fileinto runs.
+        let log = actions
+            .iter()
+            .find(|a| matches!(a, SieveAction::FileInto { mailbox, .. } if mailbox == "Log"));
+        let archive = actions
+            .iter()
+            .find(|a| matches!(a, SieveAction::FileInto { mailbox, .. } if mailbox == "Archive"));
+        assert!(log.is_some(), "Log fileinto missing, got {:?}", actions);
+        assert!(
+            archive.is_some(),
+            "Archive fileinto missing, got {:?}",
+            actions
+        );
+        // Log correctly gets copy=false
+        if let Some(SieveAction::FileInto { copy, .. }) = log {
+            assert!(!copy, "Log should have copy=false");
+        }
+        // Archive gets copy=false due to the limitation — ideally copy=true,
+        // but sieve-rs provides no way to recover this information.
+        if let Some(SieveAction::FileInto { copy, .. }) = archive {
+            assert!(!copy, "Archive gets copy=false (known limitation)");
+        }
+        // No Keep present since it was cleared
+        assert!(
+            !actions.iter().any(|a| matches!(a, SieveAction::Keep)),
+            "no Keep expected in mixed case, got {:?}",
+            actions
+        );
+    }
+
+    #[test]
+    fn reject_action_returned() {
+        let engine = SieveEngineImpl::new();
+        let script = r#"
+require "reject";
+reject "message not accepted";
+"#;
+        let script = engine.compile(script).expect("compile");
+        let actions = engine.evaluate(&script, &ctx("anything")).expect("eval");
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, SieveAction::Reject { .. })),
+            "got {:?}",
+            actions
+        );
+        // Reject should NOT produce a spurious implicit Keep.
+        assert!(
+            !actions.iter().any(|a| matches!(a, SieveAction::Keep)),
+            "got {:?}",
+            actions
+        );
     }
 }

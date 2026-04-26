@@ -25,8 +25,8 @@ pub struct ImapConfig {
     pub password: Option<String>,
     pub password_command: Option<String>,
     pub token_command: Option<String>,
-    #[serde(default = "default_true")]
-    pub tls: bool,
+    #[serde(default = "default_tls_mode")]
+    pub tls_mode: ImapTlsMode,
     #[serde(default = "default_mailbox")]
     pub mailbox: String,
 }
@@ -39,6 +39,18 @@ pub enum AuthMethod {
     Oauth2,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImapTlsMode {
+    /// Implicit TLS (IMAPS, typically port 993).
+    #[default]
+    Implicit,
+    /// STARTTLS upgrade from plain (RFC 3207, typically port 143).
+    Starttls,
+    /// Plain TCP, no encryption.
+    Plain,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SieveConfig {
     pub script_path: PathBuf,
@@ -48,8 +60,8 @@ pub struct SieveConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
-    /// Batch size for UID FETCH. Currently unused — MessageProcessor fetches
-    /// all pending UIDs in a single request. Reserved for future chunking.
+    /// Batch size for UID FETCH. Limits the number of messages processed per
+    /// batch to avoid unbounded memory usage and IMAP timeouts.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     #[serde(default = "default_reconnect_delay")]
@@ -77,8 +89,8 @@ impl Default for DaemonConfig {
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
-    /// Optional log file path. Currently unused — init_tracing outputs to stderr only.
-    /// Reserved for future file-based logging support.
+    /// Optional log file path. When set, logs are appended to this file
+    /// instead of stderr.
     pub file: Option<PathBuf>,
 }
 
@@ -100,12 +112,13 @@ pub struct SmtpConfig {
     pub password_command: Option<String>,
     #[serde(default = "default_true")]
     pub starttls: bool,
-    #[serde(default = "default_envelope_from")]
-    pub envelope_from: String,
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_tls_mode() -> ImapTlsMode {
+    ImapTlsMode::Implicit
 }
 fn default_mailbox() -> String {
     "INBOX".into()
@@ -124,9 +137,6 @@ fn default_reconnect_jitter() -> f64 {
 }
 fn default_log_level() -> String {
     "info".into()
-}
-fn default_envelope_from() -> String {
-    String::new()
 }
 
 #[derive(Debug, Error)]
@@ -165,11 +175,25 @@ impl Config {
                 "imap.password or imap.password_command required for auth_method = plain".into(),
             ));
         }
-        if matches!(self.imap.auth_method, AuthMethod::Oauth2) && self.imap.token_command.is_none()
-        {
+        if matches!(self.imap.auth_method, AuthMethod::Oauth2) {
             return Err(ConfigError::Invalid(
-                "imap.token_command required for auth_method = oauth2".into(),
+                "auth_method = oauth2 is not yet implemented".into(),
             ));
+        }
+        if let Some(ref smtp) = self.smtp {
+            if smtp.host.is_empty() {
+                return Err(ConfigError::Invalid("smtp.host must not be empty".into()));
+            }
+            if smtp.username.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "smtp.username must not be empty".into(),
+                ));
+            }
+            if smtp.password.is_none() && smtp.password_command.is_none() {
+                return Err(ConfigError::Invalid(
+                    "smtp.password or smtp.password_command required".into(),
+                ));
+            }
         }
         if !(0.0..=1.0).contains(&self.daemon.reconnect_jitter) {
             return Err(ConfigError::Invalid(
@@ -248,7 +272,7 @@ port = 993
 username = "user@example.com"
 auth_method = "plain"
 password = "secret"
-tls = true
+tls_mode = "implicit"
 
 [sieve]
 script_path = "/etc/imap-sieve/rules.sieve"
@@ -301,7 +325,7 @@ script_path = "rules.sieve"
 "#;
         let cfg: Config = toml::from_str(minimal).expect("parse");
         assert_eq!(cfg.imap.auth_method, AuthMethod::Plain);
-        assert!(cfg.imap.tls);
+        assert_eq!(cfg.imap.tls_mode, ImapTlsMode::Implicit);
         assert!(!cfg.sieve.watch);
         assert_eq!(cfg.daemon.batch_size, 10);
         assert_eq!(cfg.daemon.reconnect_delay, 5);
@@ -321,7 +345,7 @@ script_path = "rules.sieve"
             password: Some("static".into()),
             password_command: None,
             token_command: None,
-            tls: true,
+            tls_mode: ImapTlsMode::Implicit,
             mailbox: "INBOX".into(),
         };
         assert_eq!(imap.resolve_password().unwrap(), "static");
@@ -338,7 +362,7 @@ script_path = "rules.sieve"
             password: None,
             password_command: Some("printf 'from-cmd'".into()),
             token_command: None,
-            tls: true,
+            tls_mode: ImapTlsMode::Implicit,
             mailbox: "INBOX".into(),
         };
         assert_eq!(imap.resolve_password().unwrap(), "from-cmd");

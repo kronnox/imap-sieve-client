@@ -30,13 +30,13 @@ impl Backoff {
     /// which centers around 1.0 with equal probability of shorter or longer
     /// delays, preventing thundering herds on reconnect.
     pub fn next_delay(&mut self, rng: &mut impl rand::Rng) -> Duration {
-        let exp = 2u32.saturating_pow(self.attempt) as u64;
-        let base = self.cfg.initial.as_secs().saturating_mul(exp);
-        let capped = base.min(self.cfg.max.as_secs());
+        let exp = 2u32.saturating_pow(self.attempt) as u128;
+        let base = self.cfg.initial.as_millis().saturating_mul(exp);
+        let capped = base.min(self.cfg.max.as_millis());
         let jitter_factor = 1.0 - (self.cfg.jitter / 2.0) + rng.gen_range(0.0..=self.cfg.jitter);
-        let jittered = (capped as f64 * jitter_factor).min(self.cfg.max.as_secs() as f64);
+        let jittered = (capped as f64 * jitter_factor).min(self.cfg.max.as_millis() as f64);
         self.attempt = self.attempt.saturating_add(1);
-        Duration::from_secs(jittered as u64)
+        Duration::from_millis(jittered as u64)
     }
 }
 
@@ -116,6 +116,7 @@ pub struct SessionManager<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: Mai
     pub state: &'i mut StateStore,
     pub mailbox: &'s str,
     pub idle_timeout: Duration,
+    pub batch_size: usize,
     pub shutdown: Arc<Notify>,
 }
 
@@ -144,6 +145,9 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
                 self.state.update(|s| {
                     s.uidvalidity = Some(status.uidvalidity);
                     s.selected_mailbox = Some(self.mailbox.to_string());
+                    if let Some(modseq) = status.highestmodseq {
+                        s.highestmodseq = Some(modseq);
+                    }
                 })?;
             }
         }
@@ -215,6 +219,7 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
             caps,
             state: self.state,
             mailbox: self.mailbox,
+            batch_size: self.batch_size,
         };
         processor.run_batch().await?;
         Ok(())
@@ -277,6 +282,7 @@ mod session_loop_tests {
             state: &mut state,
             mailbox: "INBOX",
             idle_timeout: Duration::from_secs(60),
+            batch_size: 100,
             shutdown,
         };
         sm.run().await.unwrap();
@@ -307,6 +313,7 @@ mod session_loop_tests {
             state: &mut state,
             mailbox: "INBOX",
             idle_timeout: Duration::from_secs(60),
+            batch_size: 100,
             shutdown,
         };
         let err = sm.run().await.unwrap_err();
@@ -347,6 +354,7 @@ mod session_loop_tests {
             state: &mut state,
             mailbox: "INBOX",
             idle_timeout: Duration::from_secs(60),
+            batch_size: 100,
             shutdown,
         };
         sm.run().await.unwrap();
@@ -373,6 +381,7 @@ pub struct Supervisor<F: ConnectionFactory, E: SieveEngine, S: MailSender> {
     pub mailbox: String,
     pub backoff_cfg: BackoffConfig,
     pub idle_timeout: Duration,
+    pub batch_size: usize,
     pub shutdown: Arc<Notify>,
 }
 
@@ -429,6 +438,7 @@ where
                 state: &mut self.state,
                 mailbox: &self.mailbox,
                 idle_timeout: self.idle_timeout,
+                batch_size: self.batch_size,
                 shutdown: self.shutdown.clone(),
             };
             match session.run().await {
@@ -519,6 +529,7 @@ mod supervisor_tests {
                 jitter: 0.0,
             },
             idle_timeout: Duration::from_millis(100),
+            batch_size: 100,
             shutdown,
         };
         supervisor.run().await.unwrap();

@@ -46,6 +46,7 @@ pub trait ImapClient: Send + Sync {
         &mut self,
         mailbox: &str,
         start_uid: u32,
+        changed_since: Option<u64>,
     ) -> Result<Vec<MessageContext>, CoreError>;
     async fn uid_move(&mut self, uid: u32, target: &str) -> Result<(), CoreError>;
     async fn uid_copy(&mut self, uid: u32, target: &str) -> Result<(), CoreError>;
@@ -56,6 +57,7 @@ pub trait ImapClient: Send + Sync {
         flags: &[String],
     ) -> Result<(), CoreError>;
     async fn uid_expunge(&mut self, uids: &[u32]) -> Result<(), CoreError>;
+    async fn uid_create_mailbox(&mut self, mailbox: &str) -> Result<(), CoreError>;
     async fn idle(&mut self, timeout: std::time::Duration) -> Result<IdleEvent, CoreError>;
 }
 
@@ -98,6 +100,7 @@ pub mod fake {
         Copy(u32, String),
         Store(u32, FlagOp, Vec<String>),
         Expunge(Vec<u32>),
+        CreateMailbox(String),
     }
 
     #[derive(Default)]
@@ -151,6 +154,7 @@ pub mod fake {
             &mut self,
             _: &str,
             _: u32,
+            _: Option<u64>,
         ) -> Result<Vec<MessageContext>, CoreError> {
             Ok(std::mem::take(&mut *self.fetch_responses.lock().unwrap()))
         }
@@ -176,6 +180,13 @@ pub mod fake {
         }
         async fn uid_expunge(&mut self, uids: &[u32]) -> Result<(), CoreError> {
             self.ops.lock().unwrap().push(Op::Expunge(uids.to_vec()));
+            Ok(())
+        }
+        async fn uid_create_mailbox(&mut self, mailbox: &str) -> Result<(), CoreError> {
+            self.ops
+                .lock()
+                .unwrap()
+                .push(Op::CreateMailbox(mailbox.into()));
             Ok(())
         }
         async fn idle(&mut self, _: std::time::Duration) -> Result<IdleEvent, CoreError> {
@@ -290,31 +301,63 @@ impl AsyncImapClient {
         port: u16,
         username: &str,
         password: &str,
-        tls: bool,
+        tls_mode: &config::ImapTlsMode,
     ) -> Result<Self, CoreError> {
         let tcp = tokio::net::TcpStream::connect((host, port))
             .await
             .map_err(|e| CoreError::Imap(format!("tcp connect to {host}:{port}: {e}")))?;
 
-        let stream = if tls {
-            tls_connect(tcp, host).await?
-        } else {
-            ImapStream::Plain(tcp)
-        };
-
-        let client = async_imap::Client::new(stream);
-
-        // Read the server greeting before attempting login.
-        // The Client::new() constructor does not consume the greeting; we rely
-        // on login() to read it as part of the response loop.
-        let session = client
-            .login(username, password)
-            .await
-            .map_err(|(e, _)| CoreError::Imap(format!("login failed: {e}")))?;
-
-        Ok(Self {
-            session: Some(session),
-        })
+        match tls_mode {
+            config::ImapTlsMode::Implicit => {
+                let stream = tls_connect(tcp, host).await?;
+                let client = async_imap::Client::new(stream);
+                let session = client
+                    .login(username, password)
+                    .await
+                    .map_err(|(e, _)| CoreError::Imap(format!("login failed: {e}")))?;
+                Ok(Self {
+                    session: Some(session),
+                })
+            }
+            config::ImapTlsMode::Starttls => {
+                // Connect plain, send STARTTLS, upgrade to TLS, then login.
+                let plain = ImapStream::Plain(tcp);
+                let mut client = async_imap::Client::new(plain);
+                client
+                    .run_command_and_check_ok("STARTTLS", None)
+                    .await
+                    .map_err(|e| CoreError::Imap(format!("STARTTLS command: {e}")))?;
+                let raw_tcp = client.into_inner();
+                // Extract the underlying TcpStream from the ImapStream::Plain.
+                match raw_tcp {
+                    ImapStream::Plain(tcp_stream) => {
+                        let tls_stream = tls_connect(tcp_stream, host).await?;
+                        let tls_client = async_imap::Client::new(tls_stream);
+                        let session = tls_client
+                            .login(username, password)
+                            .await
+                            .map_err(|(e, _)| CoreError::Imap(format!("login failed: {e}")))?;
+                        Ok(Self {
+                            session: Some(session),
+                        })
+                    }
+                    ImapStream::Tls(_) => {
+                        Err(CoreError::Imap("STARTTLS on already-TLS connection".into()))
+                    }
+                }
+            }
+            config::ImapTlsMode::Plain => {
+                let stream = ImapStream::Plain(tcp);
+                let client = async_imap::Client::new(stream);
+                let session = client
+                    .login(username, password)
+                    .await
+                    .map_err(|(e, _)| CoreError::Imap(format!("login failed: {e}")))?;
+                Ok(Self {
+                    session: Some(session),
+                })
+            }
+        }
     }
 
     fn session(&mut self) -> Result<&mut async_imap::Session<ImapStream>, CoreError> {
@@ -351,6 +394,25 @@ fn flag_to_string(flag: async_imap::types::Flag<'_>) -> String {
         async_imap::types::Flag::Recent => "\\Recent".to_string(),
         async_imap::types::Flag::MayCreate => "\\*".to_string(),
         async_imap::types::Flag::Custom(s) => s.into_owned(),
+    }
+}
+
+/// Convert an IMAP `Address` to a `mailbox@host` string.
+fn addr_to_string(addr: &imap_proto::types::Address<'_>) -> String {
+    let mailbox = addr
+        .mailbox
+        .as_ref()
+        .map(|m| String::from_utf8_lossy(m).to_string())
+        .unwrap_or_default();
+    let host = addr
+        .host
+        .as_ref()
+        .map(|h| String::from_utf8_lossy(h).to_string())
+        .unwrap_or_default();
+    if host.is_empty() {
+        mailbox
+    } else {
+        format!("{mailbox}@{host}")
     }
 }
 
@@ -399,12 +461,24 @@ impl ImapClient for AsyncImapClient {
         &mut self,
         _mailbox: &str,
         start_uid: u32,
+        changed_since: Option<u64>,
     ) -> Result<Vec<MessageContext>, CoreError> {
         let query = format!("{}:*", start_uid);
+        let fetch_spec = if changed_since.is_some() {
+            // CONDSTORE: only fetch messages whose flags have changed since
+            // the given modseq. This avoids re-downloading bodies for
+            // unchanged messages on reconnect.
+            format!(
+                "(UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[]) (CHANGEDSINCE {})",
+                changed_since.unwrap()
+            )
+        } else {
+            "(UID FLAGS RFC822.SIZE ENVELOPE BODY.PEEK[])".to_string()
+        };
         let mut out = Vec::new();
         let mut stream = self
             .session()?
-            .uid_fetch(query, "(UID FLAGS RFC822.SIZE BODY.PEEK[])")
+            .uid_fetch(query, fetch_spec)
             .await
             .map_err(|e| CoreError::Imap(e.to_string()))?;
         while let Some(item) = stream.next().await {
@@ -414,12 +488,47 @@ impl ImapClient for AsyncImapClient {
             let size = m.size.unwrap_or(0);
             let flags: Vec<String> = m.flags().map(flag_to_string).collect();
             let headers = parse_headers(raw.as_deref().unwrap_or_default());
+
+            // Populate envelope_from from Return-Path header (the actual SMTP
+            // reverse-path) or fall back to the IMAP ENVELOPE From address.
+            // RFC 5321 §4.4: Return-Path contains the reverse-path in angle
+            // brackets (e.g. `<user@example.com>`). Strip them so downstream
+            // consumers (lettre::Address, SMTP envelope) get bare addresses.
+            let envelope_from = headers
+                .get("return-path")
+                .map(|s| {
+                    let s = s.trim();
+                    s.strip_prefix('<')
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or(s)
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    m.envelope().and_then(|env| {
+                        env.from
+                            .as_ref()
+                            .and_then(|addrs| addrs.first())
+                            .map(addr_to_string)
+                    })
+                });
+
+            // Populate envelope_to from the IMAP ENVELOPE To addresses.
+            let envelope_to = m
+                .envelope()
+                .and_then(|env| {
+                    env.to
+                        .as_ref()
+                        .map(|addrs| addrs.iter().map(addr_to_string).collect())
+                })
+                .unwrap_or_default();
+
             out.push(MessageContext {
                 uid,
                 mailbox: String::new(),
                 headers,
-                envelope_from: None,
-                envelope_to: vec![],
+                envelope_from,
+                envelope_to,
                 raw,
                 flags,
                 size,
@@ -484,6 +593,13 @@ impl ImapClient for AsyncImapClient {
             result.map_err(|e| CoreError::Imap(e.to_string()))?;
         }
         Ok(())
+    }
+
+    async fn uid_create_mailbox(&mut self, mailbox: &str) -> Result<(), CoreError> {
+        self.session()?
+            .create(mailbox)
+            .await
+            .map_err(|e| CoreError::Imap(e.to_string()))
     }
 
     async fn idle(&mut self, timeout: std::time::Duration) -> Result<IdleEvent, CoreError> {

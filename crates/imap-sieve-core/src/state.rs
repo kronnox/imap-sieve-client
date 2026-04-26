@@ -55,7 +55,7 @@ impl StateStore {
     }
 
     fn persist(&self) -> Result<(), StateError> {
-        let bytes = serde_json::to_vec_pretty(&self.state)?;
+        let bytes = serde_json::to_vec(&self.state)?;
         let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         use std::io::Write;

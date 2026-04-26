@@ -19,7 +19,6 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
         ctx: &MessageContext,
         actions: &[SieveAction],
     ) -> Result<(), CoreError> {
-        let mut filed = false;
         let mut discarded = false;
 
         // Process flag and execute actions first (they don't affect disposition).
@@ -50,12 +49,22 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
         // Process disposition actions.
         for action in actions {
             match action {
-                SieveAction::FileInto { mailbox, copy } => {
+                SieveAction::FileInto {
+                    mailbox,
+                    copy,
+                    create,
+                } => {
+                    if *create {
+                        // Best-effort: create the mailbox if it doesn't exist.
+                        // Ignore errors — if the target truly can't be created
+                        // (permissions, quota), the MOVE/COPY below will fail
+                        // with a more actionable error.
+                        let _ = self.imap.uid_create_mailbox(mailbox).await;
+                    }
                     if *copy {
                         self.imap.uid_copy(ctx.uid, mailbox).await?;
                     } else {
                         move_with_fallback(self.imap, self.caps, ctx.uid, mailbox).await?;
-                        filed = true;
                     }
                 }
                 SieveAction::Discard => {
@@ -83,7 +92,17 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
                         .envelope_from
                         .as_deref()
                         .ok_or_else(|| CoreError::Smtp("reject requires envelope-from".into()))?;
-                    let body = format!("Subject: Mail rejected\r\nTo: {to}\r\n\r\n{reason}\r\n");
+                    // Sanitise reason to prevent header injection: replace CRLF
+                    // sequences with spaces before interpolation into the body.
+                    let safe_reason = reason.replace("\r\n", " ").replace('\n', " ");
+                    let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S +0000");
+                    let msg_id = format!("<reject-{}@imap-sieve>", uuid::Uuid::new_v4());
+                    let body = format!(
+                        "From: <>\r\nTo: {to}\r\nDate: {date}\r\n\
+                         Message-ID: {msg_id}\r\nMIME-Version: 1.0\r\n\
+                         Subject: Mail rejected\r\n\
+                         Content-Type: text/plain; charset=utf-8\r\n\r\n{safe_reason}\r\n"
+                    );
                     smtp.send(OutgoingMail {
                         envelope_from: String::new(),
                         envelope_to: vec![to.into()],
@@ -105,7 +124,6 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
             }
         }
 
-        let _ = filed;
         Ok(())
     }
 }
@@ -165,6 +183,7 @@ mod tests {
             &[SieveAction::FileInto {
                 mailbox: "Junk".into(),
                 copy: false,
+                create: false,
             }],
         )
         .await
@@ -263,6 +282,60 @@ mod tests {
         assert_eq!(
             imap.ops(),
             vec![Op::Store(4, FlagOp::Add, vec!["\\Seen".into()])]
+        );
+    }
+
+    #[tokio::test]
+    async fn fileinto_copy_uses_uid_copy() {
+        let mut imap = FakeImap::new();
+        let smtp = FakeSender::new();
+        let caps = imap.caps.clone();
+        let mut exec = ActionExecutor {
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            caps: &caps,
+            source_mailbox: "INBOX",
+        };
+        exec.execute(
+            &ctx(7),
+            &[SieveAction::FileInto {
+                mailbox: "Archive".into(),
+                copy: true,
+                create: false,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(imap.ops(), vec![Op::Copy(7, "Archive".into())]);
+    }
+
+    #[tokio::test]
+    async fn fileinto_create_creates_mailbox_first() {
+        let mut imap = FakeImap::new();
+        let smtp = FakeSender::new();
+        let caps = imap.caps.clone();
+        let mut exec = ActionExecutor {
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            caps: &caps,
+            source_mailbox: "INBOX",
+        };
+        exec.execute(
+            &ctx(5),
+            &[SieveAction::FileInto {
+                mailbox: "NewFolder".into(),
+                copy: false,
+                create: true,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            imap.ops(),
+            vec![
+                Op::CreateMailbox("NewFolder".into()),
+                Op::Move(5, "NewFolder".into()),
+            ]
         );
     }
 }

@@ -18,6 +18,7 @@ pub struct MessageProcessor<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: M
     pub caps: &'s Capabilities,
     pub state: &'i mut StateStore,
     pub mailbox: &'s str,
+    pub batch_size: usize,
 }
 
 impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
@@ -41,7 +42,18 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
                 ));
             }
         };
-        let messages = self.imap.fetch_uid_range(self.mailbox, start).await?;
+        let changed_since = if self.caps.condstore {
+            self.state.state().highestmodseq
+        } else {
+            None
+        };
+        let mut messages = self
+            .imap
+            .fetch_uid_range(self.mailbox, start, changed_since)
+            .await?;
+        // Apply batch_size limit to avoid processing an unbounded number of
+        // messages in a single batch (e.g. after a long downtime).
+        messages.truncate(self.batch_size);
         let script = self.script.current();
         let mut results = Vec::with_capacity(messages.len());
 
@@ -50,11 +62,15 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
             let (actions, status) = match actions_result {
                 Ok(a) => (a, ProcessingStatus::Ok),
                 Err(e) => {
-                    tracing::error!(uid = msg.uid, error = %e, "sieve evaluation failed; falling back to keep");
-                    (
-                        vec![SieveAction::Keep],
-                        ProcessingStatus::SieveError(e.to_string()),
-                    )
+                    tracing::error!(uid = msg.uid, error = %e, "sieve evaluation failed; stopping batch");
+                    results.push(ProcessingResult {
+                        uid: msg.uid,
+                        actions: vec![SieveAction::Keep],
+                        status: ProcessingStatus::SieveError(e.to_string()),
+                    });
+                    // Stop processing: last_seen_uid is NOT advanced past this
+                    // UID, so the next batch will re-fetch from this message.
+                    break;
                 }
             };
 
@@ -67,17 +83,22 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
             let final_status = match exec.execute(&msg, &actions).await {
                 Ok(()) => status,
                 Err(e) => {
-                    tracing::error!(uid = msg.uid, error = %e, "action execution failed");
-                    ProcessingStatus::ActionError(e.to_string())
+                    tracing::error!(uid = msg.uid, error = %e, "action execution failed; stopping batch");
+                    results.push(ProcessingResult {
+                        uid: msg.uid,
+                        actions,
+                        status: ProcessingStatus::ActionError(e.to_string()),
+                    });
+                    // Stop processing: last_seen_uid is NOT advanced past this
+                    // UID, so the next batch will re-fetch from this message.
+                    break;
                 }
             };
 
-            // Only advance `last_seen_uid` on successful processing.
-            if matches!(final_status, ProcessingStatus::Ok) {
-                self.state.update(|s| {
-                    s.last_seen_uid = Some(msg.uid.max(s.last_seen_uid.unwrap_or(0)));
-                })?;
-            }
+            // Advance `last_seen_uid` on successful processing.
+            self.state.update(|s| {
+                s.last_seen_uid = Some(msg.uid.max(s.last_seen_uid.unwrap_or(0)));
+            })?;
 
             results.push(ProcessingResult {
                 uid: msg.uid,
@@ -143,6 +164,7 @@ mod tests {
             caps: &caps,
             state: &mut state,
             mailbox: "INBOX",
+            batch_size: 100,
         };
         let results = processor.run_batch().await.unwrap();
 
@@ -178,6 +200,7 @@ mod tests {
             caps: &caps,
             state: &mut state,
             mailbox: "INBOX",
+            batch_size: 100,
         };
         let results = processor.run_batch().await.unwrap();
         assert!(matches!(results[0].status, ProcessingStatus::SieveError(_)));
@@ -206,8 +229,48 @@ mod tests {
             caps: &caps,
             state: &mut state,
             mailbox: "INBOX",
+            batch_size: 100,
         };
         let err = processor.run_batch().await.unwrap_err();
         assert!(matches!(err, CoreError::Imap(_)));
+    }
+
+    #[tokio::test]
+    async fn batch_stops_on_first_failure_for_at_least_once_retry() {
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("rules.sieve");
+        std::fs::write(&script_path, "keep;").unwrap();
+        let engine = SieveEngineImpl::new();
+        let (_l, handle) = ScriptLoader::load(SieveEngineImpl::new(), &script_path).unwrap();
+
+        // UID 10: good, UID 11: bad (no raw), UID 12: good
+        let mut bad = msg(11, "x");
+        bad.raw = None;
+        let mut imap = FakeImap::new();
+        *imap.fetch_responses.lock().unwrap() = vec![msg(10, "ok"), bad, msg(12, "ok")];
+        let smtp = FakeSender::new();
+        let caps = imap.caps.clone();
+        let mut state = StateStore::open(dir.path().join("state.json")).unwrap();
+        state.update(|s| s.last_seen_uid = Some(9)).unwrap();
+
+        let mut processor = MessageProcessor {
+            engine: &engine,
+            script: &handle,
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            caps: &caps,
+            state: &mut state,
+            mailbox: "INBOX",
+            batch_size: 100,
+        };
+        let results = processor.run_batch().await.unwrap();
+
+        // UID 10 succeeds, UID 11 fails and stops the batch.
+        assert_eq!(results.len(), 2);
+        assert!(matches!(results[0].status, ProcessingStatus::Ok));
+        assert!(matches!(results[1].status, ProcessingStatus::SieveError(_)));
+        // last_seen_uid advanced to 10 but NOT past 11 — UID 11 and 12
+        // will be re-fetched on the next batch.
+        assert_eq!(state.state().last_seen_uid, Some(10));
     }
 }

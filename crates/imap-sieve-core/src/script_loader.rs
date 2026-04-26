@@ -35,6 +35,7 @@ impl<E: SieveEngine> ScriptLoader<E> {
     /// Compile the script at `path` once and return a `ScriptHandle` plus this loader.
     pub fn load(engine: E, path: impl Into<PathBuf>) -> Result<(Self, ScriptHandle), LoaderError> {
         let path = path.into();
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
         let text = std::fs::read_to_string(&path)?;
         let compiled = engine.compile(&text)?;
         let handle = Arc::new(ArcSwap::from_pointee(compiled));
@@ -75,6 +76,11 @@ impl Drop for WatcherGuard {
 impl<E: SieveEngine + Send + Sync + 'static> ScriptLoader<E> {
     /// Spawn a notify-based watcher that reloads on file change.
     /// Returns a guard; dropping it stops the watcher and joins the worker.
+    ///
+    /// Watches the **parent directory** so that atomic-rename-based saves
+    /// (vim, emacs, deployment tools) are detected — these write a temp file
+    /// then rename it into place, which replaces the inode. Watching the file
+    /// itself would miss the `IN_MOVE_SELF` event.
     pub fn spawn_watcher(self) -> Result<WatcherGuard, LoaderError> {
         use std::sync::mpsc;
 
@@ -83,20 +89,30 @@ impl<E: SieveEngine + Send + Sync + 'static> ScriptLoader<E> {
             let _ = tx.send(res);
         })
         .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        // Watch the parent directory to catch rename-based saves.
+        let parent = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         watcher
-            .watch(&self.path, RecursiveMode::NonRecursive)
+            .watch(parent, RecursiveMode::NonRecursive)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let loader = self;
+        let script_path = loader.path.clone();
         let thread = std::thread::Builder::new()
             .name("sieve-watcher".into())
             .spawn(move || {
                 while let Ok(res) = rx.recv() {
                     match res {
                         Ok(event) => {
+                            if !event.paths.iter().any(|p| p == &script_path) {
+                                continue;
+                            }
                             if matches!(
                                 event.kind,
-                                EventKind::Modify(_) | EventKind::Create(_)
+                                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                             ) {
                                 if let Err(e) = loader.reload() {
                                     tracing::warn!(error = %e, "sieve script reload failed; keeping previous script");
@@ -178,7 +194,11 @@ mod tests {
         let _watcher = loader.spawn_watcher().expect("watcher");
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        std::fs::write(&path, "discard;").unwrap();
+
+        // Simulate atomic-rename-based save (vim, emacs, deployment tools)
+        let tmp = dir.path().join("rules.sieve.tmp");
+        std::fs::write(&tmp, "discard;").unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
 
         // Give the watcher time to pick up the change
         for _ in 0..40 {
