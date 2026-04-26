@@ -1,7 +1,7 @@
 # imap-sieve
 
 A standalone IMAP daemon that processes incoming mail using Sieve (RFC 5228) rules.
-Mail-server agnostic — connects to any IMAP server with IDLE support.
+Mail-server agnostic. Connects to any IMAP server with IDLE support.
 
 ## Features
 
