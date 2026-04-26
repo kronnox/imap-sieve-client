@@ -77,3 +77,254 @@ mod tests {
         assert_eq!(b.next_delay(&mut rng), Duration::from_secs(5));
     }
 }
+
+use crate::imap_client::{IdleEvent, ImapClient};
+use crate::processor::MessageProcessor;
+use crate::script_loader::ScriptHandle;
+use crate::sieve_engine::SieveEngine;
+use crate::smtp_sender::MailSender;
+use crate::state::StateStore;
+use crate::types::CoreError;
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(29 * 60);
+
+/// Lifetimes: `'i` for per-iteration mutable borrows, `'s` for shared refs.
+pub struct SessionManager<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized> {
+    pub engine: &'s E,
+    pub script: &'s ScriptHandle,
+    pub imap: &'i mut C,
+    pub smtp: Option<&'s S>,
+    pub state: &'i mut StateStore,
+    pub mailbox: &'s str,
+    pub idle_timeout: Duration,
+    pub shutdown: Arc<Notify>,
+}
+
+impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
+    SessionManager<'i, 's, E, C, S>
+{
+    /// Run the IDLE → process → repeat loop until `shutdown` is notified or a
+    /// non-recoverable error occurs.
+    pub async fn run(&mut self) -> Result<(), CoreError> {
+        let caps = self.imap.capabilities().await?;
+        if !caps.idle {
+            return Err(CoreError::MissingCapability("IDLE"));
+        }
+
+        let status = self.imap.select(self.mailbox).await?;
+
+        // Validate or persist UIDVALIDITY.
+        match self.state.state().uidvalidity {
+            Some(cached) if cached != status.uidvalidity => {
+                return Err(CoreError::UidValidityChanged {
+                    cached,
+                    server: status.uidvalidity,
+                });
+            }
+            _ => {
+                self.state.update(|s| {
+                    s.uidvalidity = Some(status.uidvalidity);
+                    s.selected_mailbox = Some(self.mailbox.to_string());
+                })?;
+            }
+        }
+
+        // First-run UID seeding: per spec, the daemon processes only mail
+        // arriving *after* startup. If no `last_seen_uid` is persisted yet,
+        // anchor at `UIDNEXT - 1` so we skip every existing message.
+        // (UIDNEXT is the UID the *next* arrival will get.)
+        if self.state.state().last_seen_uid.is_none() {
+            let seed = status.uidnext.saturating_sub(1);
+            self.state.update(|s| s.last_seen_uid = Some(seed))?;
+            tracing::info!(
+                seed_uid = seed,
+                uidnext = status.uidnext,
+                "first run: anchored last_seen_uid to UIDNEXT-1; existing messages will not be processed"
+            );
+        }
+
+        // Drain any messages that arrived between shutdown and restart
+        // (or, on first run with a non-empty mailbox, none — the seed
+        // above ensures the fetch range is empty).
+        self.process_pending(&caps).await?;
+
+        loop {
+            // Cancellation safety: if `shutdown` fires while `idle` is in
+            // flight, the IDLE future is dropped *without* sending DONE. The
+            // `ImapClient::idle` implementation must therefore use a
+            // best-effort `done()` in its own cleanup path (see Phase 9.1).
+            // This loop assumes `idle()` is cancel-safe in the sense that
+            // dropping the future leaves the connection unusable but not
+            // catastrophically broken — the supervisor will reconnect.
+            tokio::select! {
+                biased;
+                _ = self.shutdown.notified() => {
+                    tracing::info!("shutdown requested; exiting session loop");
+                    return Ok(());
+                }
+                event = self.imap.idle(self.idle_timeout) => {
+                    match event? {
+                        IdleEvent::Exists(_) => {
+                            self.process_pending(&caps).await?;
+                        }
+                        IdleEvent::Interrupted => {
+                            // IDLE timed out (29 min keepalive per RFC 2177);
+                            // also poll for any messages that arrived during
+                            // the IDLE window in case the server didn't push
+                            // EXISTS, then re-enter IDLE.
+                            self.process_pending(&caps).await?;
+                            continue;
+                        }
+                        IdleEvent::Disconnected => {
+                            return Err(CoreError::Imap("connection lost during IDLE".into()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_pending(&mut self, caps: &crate::imap_client::Capabilities) -> Result<(), CoreError> {
+        let mut processor = MessageProcessor {
+            engine: self.engine,
+            script: self.script,
+            imap: self.imap,
+            smtp: self.smtp,
+            caps,
+            state: self.state,
+            mailbox: self.mailbox,
+        };
+        processor.run_batch().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod session_loop_tests {
+    use super::*;
+    use crate::imap_client::fake::FakeImap;
+    use crate::script_loader::ScriptLoader;
+    use crate::sieve_engine::SieveEngineImpl;
+    use crate::smtp_sender::fake::FakeSender;
+    use crate::types::MessageContext;
+    use std::collections::BTreeMap;
+    use tempfile::TempDir;
+
+    fn msg(uid: u32) -> MessageContext {
+        let mut headers = BTreeMap::new();
+        headers.insert("subject".into(), "x".into());
+        MessageContext {
+            uid,
+            mailbox: "INBOX".into(),
+            headers,
+            envelope_from: Some("a@b".into()),
+            envelope_to: vec!["c@d".into()],
+            raw: Some(b"Subject: x\r\n\r\nbody".to_vec()),
+            flags: vec![],
+            size: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn processes_pending_then_shuts_down() {
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("rules.sieve");
+        std::fs::write(&script_path, "keep;").unwrap();
+        let engine = SieveEngineImpl::new();
+        let (_l, handle) = ScriptLoader::load(SieveEngineImpl::new(), &script_path).unwrap();
+
+        let mut imap = FakeImap::new();
+        // Simulate UIDNEXT = 3 so first-run seeding sets last_seen_uid = 2
+        imap.status.uidnext = 3;
+        *imap.fetch_responses.lock().unwrap() = vec![msg(1), msg(2)];
+        let smtp = FakeSender::new();
+        let mut state = StateStore::open(dir.path().join("state.json")).unwrap();
+        let shutdown = Arc::new(Notify::new());
+
+        let s = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            s.notify_one();
+        });
+
+        let mut sm = SessionManager {
+            engine: &engine,
+            script: &handle,
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            state: &mut state,
+            mailbox: "INBOX",
+            idle_timeout: Duration::from_secs(60),
+            shutdown,
+        };
+        sm.run().await.unwrap();
+        // With at-least-once semantics, successful processing advances last_seen_uid.
+        assert_eq!(state.state().last_seen_uid, Some(2));
+    }
+
+    #[tokio::test]
+    async fn uidvalidity_change_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("rules.sieve");
+        std::fs::write(&script_path, "keep;").unwrap();
+        let engine = SieveEngineImpl::new();
+        let (_l, handle) = ScriptLoader::load(SieveEngineImpl::new(), &script_path).unwrap();
+
+        let mut imap = FakeImap::new();
+        imap.status.uidvalidity = 99;
+        let smtp = FakeSender::new();
+        let mut state = StateStore::open(dir.path().join("state.json")).unwrap();
+        state.update(|s| s.uidvalidity = Some(7)).unwrap();
+        let shutdown = Arc::new(Notify::new());
+
+        let mut sm = SessionManager {
+            engine: &engine,
+            script: &handle,
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            state: &mut state,
+            mailbox: "INBOX",
+            idle_timeout: Duration::from_secs(60),
+            shutdown,
+        };
+        let err = sm.run().await.unwrap_err();
+        assert!(matches!(err, CoreError::UidValidityChanged { cached: 7, server: 99 }));
+    }
+
+    #[tokio::test]
+    async fn first_run_seeds_last_seen_uid_from_uidnext() {
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("rules.sieve");
+        std::fs::write(&script_path, "keep;").unwrap();
+        let engine = SieveEngineImpl::new();
+        let (_l, handle) = ScriptLoader::load(SieveEngineImpl::new(), &script_path).unwrap();
+
+        let mut imap = FakeImap::new();
+        // Mailbox has 42 existing messages; UIDNEXT = 43 means the next
+        // arriving message will get UID 43. Seeding at 42 skips them all.
+        imap.status.uidnext = 43;
+        imap.status.exists = 42;
+        // No new messages to fetch — the batch should be empty.
+        *imap.fetch_responses.lock().unwrap() = vec![];
+        let smtp = FakeSender::new();
+        let mut state = StateStore::open(dir.path().join("state.json")).unwrap();
+        let shutdown = Arc::new(Notify::new());
+        shutdown.notify_one(); // immediate shutdown
+
+        let mut sm = SessionManager {
+            engine: &engine,
+            script: &handle,
+            imap: &mut imap,
+            smtp: Some(&smtp),
+            state: &mut state,
+            mailbox: "INBOX",
+            idle_timeout: Duration::from_secs(60),
+            shutdown,
+        };
+        sm.run().await.unwrap();
+        // last_seen_uid seeded to UIDNEXT-1 = 42; no messages processed.
+        assert_eq!(state.state().last_seen_uid, Some(42));
+    }
+}

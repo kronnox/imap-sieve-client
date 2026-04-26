@@ -163,6 +163,10 @@ pub mod fake {
             Ok(())
         }
         async fn idle(&mut self, _: std::time::Duration) -> Result<IdleEvent, CoreError> {
+            // Yield to the runtime so that other tasks (e.g. shutdown
+            // notifications) get a chance to run. A real IDLE command
+            // would block on network I/O and naturally yield.
+            tokio::task::yield_now().await;
             Ok(IdleEvent::Interrupted)
         }
     }
