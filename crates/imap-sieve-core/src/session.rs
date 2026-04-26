@@ -328,3 +328,170 @@ mod session_loop_tests {
         assert_eq!(state.state().last_seen_uid, Some(42));
     }
 }
+
+use async_trait::async_trait;
+
+/// Constructs a fresh `ImapClient` on demand. Used by `Supervisor` for reconnects.
+#[async_trait]
+pub trait ConnectionFactory: Send + Sync {
+    type Client: ImapClient + Send + 'static;
+    async fn connect(&self) -> Result<Self::Client, CoreError>;
+}
+
+pub struct Supervisor<F: ConnectionFactory, E: SieveEngine, S: MailSender> {
+    pub factory: F,
+    pub engine: E,
+    pub script: ScriptHandle,
+    pub smtp: Option<S>,
+    pub state: StateStore,
+    pub mailbox: String,
+    pub backoff_cfg: BackoffConfig,
+    pub idle_timeout: Duration,
+    pub shutdown: Arc<Notify>,
+}
+
+impl<F, E, S> Supervisor<F, E, S>
+where
+    F: ConnectionFactory,
+    E: SieveEngine,
+    S: MailSender,
+{
+    /// Run the reconnect loop: connect → session → reconnect on error.
+    ///
+    /// Returns `Ok(())` on graceful shutdown, `Err(UidValidityChanged)` on
+    /// UIDVALIDITY mismatch (fatal — operator must intervene), or `Err` on
+    /// an unrecoverable error that exhausted retries.
+    pub async fn run(mut self) -> Result<(), CoreError> {
+        let mut backoff = Backoff::new(self.backoff_cfg);
+        let mut rng = rand::thread_rng();
+
+        loop {
+            // Connect, with cancellation-aware retry.
+            let mut client = loop {
+                tokio::select! {
+                    biased;
+                    _ = self.shutdown.notified() => {
+                        tracing::info!("shutdown requested during connect; exiting");
+                        return Ok(());
+                    }
+                    result = self.factory.connect() => {
+                        match result {
+                            Ok(c) => {
+                                backoff.reset();
+                                break c;
+                            }
+                            Err(e) => {
+                                let delay = backoff.next_delay(&mut rng);
+                                tracing::warn!(error = %e, ?delay, "connect failed; will retry");
+                                // Sleep before retrying, but bail out if shutdown fires.
+                                tokio::select! {
+                                    _ = tokio::time::sleep(delay) => continue,
+                                    _ = self.shutdown.notified() => return Ok(()),
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Run the session to completion (or until an error occurs).
+            let mut session = SessionManager {
+                engine: &self.engine,
+                script: &self.script,
+                imap: &mut client,
+                smtp: self.smtp.as_ref(),
+                state: &mut self.state,
+                mailbox: &self.mailbox,
+                idle_timeout: self.idle_timeout,
+                shutdown: self.shutdown.clone(),
+            };
+            match session.run().await {
+                Ok(()) => return Ok(()), // graceful shutdown
+                Err(CoreError::UidValidityChanged { cached, server }) => {
+                    // Fatal — UIDVALIDITY changed. Log prominently and propagate.
+                    tracing::error!(
+                        cached_uidvalidity = cached,
+                        server_uidvalidity = server,
+                        "UIDVALIDITY changed; operator must verify mailbox and reset state. Refusing to process."
+                    );
+                    return Err(CoreError::UidValidityChanged { cached, server });
+                }
+                Err(e) => {
+                    let delay = backoff.next_delay(&mut rng);
+                    tracing::warn!(error = %e, ?delay, "session error; reconnecting");
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {},
+                        _ = self.shutdown.notified() => return Ok(()),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod supervisor_tests {
+    use super::*;
+    use crate::imap_client::fake::FakeImap;
+    use crate::script_loader::ScriptLoader;
+    use crate::sieve_engine::SieveEngineImpl;
+    use crate::smtp_sender::fake::FakeSender;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tempfile::TempDir;
+
+    struct CountingFactory {
+        count: AtomicU32,
+        fail_first_n: u32,
+    }
+
+    #[async_trait]
+    impl ConnectionFactory for CountingFactory {
+        type Client = FakeImap;
+        async fn connect(&self) -> Result<Self::Client, CoreError> {
+            let n = self.count.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_first_n {
+                Err(CoreError::Imap(format!("simulated failure {n}")))
+            } else {
+                Ok(FakeImap::new())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_retries_then_succeeds_then_shuts_down() {
+        let dir = TempDir::new().unwrap();
+        let script_path = dir.path().join("rules.sieve");
+        std::fs::write(&script_path, "keep;").unwrap();
+        let engine = SieveEngineImpl::new();
+        let (_l, handle) = ScriptLoader::load(SieveEngineImpl::new(), &script_path).unwrap();
+
+        let smtp: FakeSender = FakeSender::new();
+        let mut state = StateStore::open(dir.path().join("state.json")).unwrap();
+        // Seed state so the processor doesn't reject the batch.
+        state.update(|s| s.last_seen_uid = Some(0)).unwrap();
+        let shutdown = Arc::new(Notify::new());
+
+        let s = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            s.notify_one();
+        });
+
+        let supervisor = Supervisor {
+            factory: CountingFactory { count: AtomicU32::new(0), fail_first_n: 2 },
+            engine,
+            script: handle,
+            smtp: Some(smtp),
+            state,
+            mailbox: "INBOX".into(),
+            backoff_cfg: BackoffConfig {
+                initial: Duration::from_millis(10),
+                max: Duration::from_millis(50),
+                jitter: 0.0,
+            },
+            idle_timeout: Duration::from_millis(100),
+            shutdown,
+        };
+        supervisor.run().await.unwrap();
+    }
+}
