@@ -2,42 +2,58 @@
 # Save as /etc/imap-sieve/config.toml or pass --config <path>.
 
 [imap]
-host = "imap.example.com"
-port = 993
-username = "user@example.com"
-# Auth: "plain" (default) or "oauth2"
+host = "imap.example.com"          # Required. IMAP server hostname.
+port = 993                          # Required. IMAP server port.
+username = "user@example.com"       # Required. Login username.
+
+# Authentication method: "plain" (default) or "oauth2" (not yet implemented).
 auth_method = "plain"
-# Either provide `password` directly:
+
+# For auth_method = "plain", provide one of:
 password = "secret"
-# Or fetch it on demand from a command:
 # password_command = "pass show mail/example"
-# For OAuth2:
-# auth_method = "oauth2"
+
+# For auth_method = "oauth2" (not yet implemented):
 # token_command = "oauth2cmd get-token user@example.com"
-tls = true
+
+# TLS mode: "implicit" (IMAPS on port 993, default),
+#           "starttls" (STARTTLS upgrade on port 143),
+#           "plain" (no encryption, testing only).
+tls_mode = "implicit"
+
+# Mailbox to monitor (default: "INBOX").
 mailbox = "INBOX"
 
 [sieve]
+# Required. Path to the sieve script.
 script_path = "/etc/imap-sieve/rules.sieve"
-watch = true   # hot-reload on file change
+# Hot-reload script on file change (default: false).
+watch = true
 
 [daemon]
+# Max messages per batch (default: 10).
 batch_size = 10
+# Initial reconnect delay in seconds (default: 5).
 reconnect_delay = 5
+# Max reconnect delay in seconds (default: 300).
 max_reconnect_delay = 300
+# Reconnect delay jitter factor, 0.0–1.0 (default: 0.5).
 reconnect_jitter = 0.5
-# Override the default state directory ($XDG_STATE_HOME/imap-sieve):
+# Override state directory (default: $XDG_STATE_DIR/imap-sieve).
 # state_dir = "/var/lib/imap-sieve"
 
 [logging]
+# Log level: trace, debug, info, warn, error (default: "info").
 level = "info"
+# Optional: log to file instead of stderr.
 # file = "/var/log/imap-sieve/daemon.log"
 
-# Required only if your sieve script uses `redirect` or `reject`.
+# SMTP relay for redirect/reject actions.
+# Required only if your sieve scripts use redirect or reject.
 # [smtp]
 # host = "smtp.example.com"
 # port = 587
 # username = "user@example.com"
 # password = "secret"
+# password_command = "pass show smtp/example"
 # starttls = true
-# envelope_from = "user@example.com"
