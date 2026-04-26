@@ -1,0 +1,43 @@
+# imap-sieve configuration
+# Save as /etc/imap-sieve/config.toml or pass --config <path>.
+
+[imap]
+host = "imap.example.com"
+port = 993
+username = "user@example.com"
+# Auth: "plain" (default) or "oauth2"
+auth_method = "plain"
+# Either provide `password` directly:
+password = "secret"
+# Or fetch it on demand from a command:
+# password_command = "pass show mail/example"
+# For OAuth2:
+# auth_method = "oauth2"
+# token_command = "oauth2cmd get-token user@example.com"
+tls = true
+mailbox = "INBOX"
+
+[sieve]
+script_path = "/etc/imap-sieve/rules.sieve"
+watch = true   # hot-reload on file change
+
+[daemon]
+batch_size = 10
+reconnect_delay = 5
+max_reconnect_delay = 300
+reconnect_jitter = 0.5
+# Override the default state directory ($XDG_STATE_HOME/imap-sieve):
+# state_dir = "/var/lib/imap-sieve"
+
+[logging]
+level = "info"
+# file = "/var/log/imap-sieve/daemon.log"
+
+# Required only if your sieve script uses `redirect` or `reject`.
+# [smtp]
+# host = "smtp.example.com"
+# port = 587
+# username = "user@example.com"
+# password = "secret"
+# starttls = true
+# envelope_from = "user@example.com"
