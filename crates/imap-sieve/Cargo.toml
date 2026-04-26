@@ -1,0 +1,21 @@
+[package]
+name = "imap-sieve"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "imap-sieve"
+path = "src/main.rs"
+
+[dependencies]
+config = { workspace = true }
+imap-sieve-core = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+dirs = { workspace = true }

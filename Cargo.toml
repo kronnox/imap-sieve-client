@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/config", "crates/imap-sieve-core", "crates/imap-sieve"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0"
+
+[workspace.dependencies]
+# Internal
+config = { path = "crates/config" }
+imap-sieve-core = { path = "crates/imap-sieve-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# IMAP / Sieve / SMTP
+# `async-imap` is pinned to a known-good minor; the API has churned across versions.
+async-imap = { version = "=0.9.7", default-features = false, features = ["runtime-tokio"] }
+imap-proto = "0.16"
+tokio-rustls = "0.25"
+rustls = "0.22"
+rustls-pki-types = "1"
+webpki-roots = "0.26"
+sieve-rs = "0.7"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport"] }
+
+# Misc
+clap = { version = "4", features = ["derive"] }
+notify = "6"
+rand = "0.8"
+tempfile = "3"
+arc-swap = "1"
+async-trait = "0.1"
+dirs = "5"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

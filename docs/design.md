@@ -248,7 +248,8 @@ password = "secret"                    # for auth_method = "plain"
 # For OAuth2/XOAUTH2:
 # auth_method = "oauth2"
 # token_command = "oauth2cmd get-token user@example.com"  # command to refresh token
-tls = true
+# TLS mode: "implicit" (default, IMAPS on port 993), "starttls" (STARTTLS on port 143), "plain" (no encryption)
+tls_mode = "implicit"
 
 [sieve]
 script_path = "/etc/imap-sieve/rules.sieve"
@@ -264,14 +265,13 @@ reconnect_delay = 5
 max_reconnect_delay = 300
 # Reconnect delay jitter factor (0.0-1.0, applied as random multiplier)
 reconnect_jitter = 0.5
+# Override state directory (default: $XDG_STATE_HOME/imap-sieve or ~/.local/state/imap-sieve)
+# state_dir = "/var/lib/imap-sieve"
 
 [logging]
 level = "info"
 # Optional: log to file
 # file = "/var/log/imap-sieve/daemon.log"
-
-# State persistence directory (default: $XDG_STATE_DIR/imap-sieve or ~/.local/state/imap-sieve)
-# state_dir = "/var/lib/imap-sieve"
 
 # SMTP relay for redirect/reject actions (optional — required only if sieve scripts use redirect/reject)
 [smtp]
@@ -340,17 +340,16 @@ This is the safest approach — a UIDVALIDITY change means all cached UIDs are i
 - **Auto-reconnect** with exponential backoff + jitter on IMAP connection loss:
   - Initial delay: `reconnect_delay` seconds
   - Cap: `max_reconnect_delay` seconds
-  - Jitter: `delay * (0.5 + random(0..reconnect_jitter))` to avoid thundering herd
+  - Jitter: `delay * (1 - jitter/2 + random(0..jitter))` — centers around the base delay to avoid thundering herd
 - **IDLE re-establishment** after reconnect
 - **UID tracking**: Track `last_seen_uid` + `UIDVALIDITY` to avoid re-processing messages after reconnect
 - **IDLE timeout**: Re-enter IDLE every 29 minutes (RFC 2177 recommendation) to detect stale connections and satisfy server-side IDLE timeouts. This replaces NOOP-based health checks — IDLE has its own keepalive mechanism.
 
 ### Message Processing Resilience
 
-- Each message processed independently — one failure doesn't block others
-- Failed actions logged with full context (message UID, matched rule, attempted action)
-- Configurable retry for transient IMAP errors (network timeout, server busy)
-- **At-least-once processing**: On crash, some messages may be re-processed on restart. Most Sieve actions are idempotent:
+- At-least-once processing: batch stops on first error so failed UIDs are retried
+- Failed actions logged with context (message UID, error)
+- On crash, some messages may be re-processed on restart. Most Sieve actions are idempotent:
   - `fileinto` / `keep`: Moving to a folder is idempotent if the message is already there (UID MOVE is idempotent, COPY may create duplicates — log a warning)
   - `discard`: Re-discarding an already-deleted message is a no-op
   - `redirect`: **Non-idempotent** — sends duplicate emails on re-processing. Log a warning on re-processed redirect actions. Operators should be aware of this limitation.
@@ -371,8 +370,7 @@ This is the safest approach — a UIDVALIDITY change means all cached UIDs are i
 
 ```
 imap-sieve start          # Start the daemon (foreground)
-imap-sieve start --detach # Start as background process
-imap-sieve stop           # Stop the running daemon
+imap-sieve stop           # Not yet implemented; send SIGTERM or Ctrl+C
 imap-sieve status         # Show daemon status and connection state
 imap-sieve test-rule      # Test a sieve rule against a message (dry-run)
 imap-sieve check          # Validate sieve script without running
@@ -418,15 +416,20 @@ imap-sieve-client/
 │   │       ├── action_executor.rs # Sieve actions → IMAP/SMTP operations
 │   │       ├── session.rs       # IMAP session manager (IDLE, reconnect, UID tracking)
 │   │       ├── processor.rs     # Message processing pipeline
-│   │       └── state.rs         # State persistence (JSON file)
+│   │       ├── state.rs         # State persistence (JSON file)
+│   │       ├── imap_client.rs   # ImapClient trait + AsyncImapClient + fake impl
+│   │       ├── smtp_sender.rs   # MailSender trait + LettreMailSender + fake impl
+│   │       ├── script_loader.rs # Script loading + hot-reload watcher
+│   │       └── types.rs         # MessageContext, SieveAction, CoreError, parse_headers
 │   └── imap-sieve/             # Binary (thin CLI wrapper)
 │       └── src/
 │           ├── main.rs          # CLI entry point (clap)
-│           └── daemon.rs        # Daemon lifecycle, signal handling
+│           └── daemon.rs        # Daemon lifecycle, signal handling, init_tracing
+├── examples/                   # Example sieve scripts
 ├── tests/
-│   └── integration/             # Integration tests (Dovecot Docker)
-└── sieve-scripts/               # Example sieve scripts
-    └── example.sieve
+│   └── integration/            # Integration tests (Dovecot Docker)
+└── docs/
+    └── design.md               # This design specification
 ```
 
 ## Dependencies (Key Crates)

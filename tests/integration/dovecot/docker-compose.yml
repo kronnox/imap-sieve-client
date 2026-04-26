@@ -1,0 +1,10 @@
+version: "3.8"
+services:
+  dovecot:
+    image: dovecot/dovecot:latest
+    container_name: imap-sieve-dovecot
+    ports:
+      - "14300:143"
+    volumes:
+      - ./dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./users:/etc/dovecot/users:ro

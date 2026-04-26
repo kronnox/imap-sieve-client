@@ -1,0 +1,37 @@
+[package]
+name = "imap-sieve-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+config = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-imap = { workspace = true }
+imap-proto = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+webpki-roots = { workspace = true }
+sieve-rs = { workspace = true }
+lettre = { workspace = true }
+notify = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+config = { workspace = true }
