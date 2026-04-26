@@ -22,7 +22,8 @@ struct Cli {
 enum Command {
     /// Run the daemon in the foreground.
     Start,
-    /// Stop the running daemon (sends SIGTERM via PID file).
+    /// Stop the running daemon (sends SIGTERM via PID file). Not yet implemented.
+    #[command(hide = true)]
     Stop,
     /// Show daemon status and connection state.
     Status,

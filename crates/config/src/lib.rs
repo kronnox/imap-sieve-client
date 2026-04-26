@@ -48,6 +48,8 @@ pub struct SieveConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
+    /// Batch size for UID FETCH. Currently unused — MessageProcessor fetches
+    /// all pending UIDs in a single request. Reserved for future chunking.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     #[serde(default = "default_reconnect_delay")]
@@ -75,6 +77,8 @@ impl Default for DaemonConfig {
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
+    /// Optional log file path. Currently unused — init_tracing outputs to stderr only.
+    /// Reserved for future file-based logging support.
     pub file: Option<PathBuf>,
 }
 

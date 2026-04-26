@@ -25,11 +25,15 @@ impl Backoff {
     }
 
     /// Returns the next delay and increments the attempt counter.
+    ///
+    /// The jitter formula is: `base * (1.0 - jitter/2 + random(0..jitter))`
+    /// which centers around 1.0 with equal probability of shorter or longer
+    /// delays, preventing thundering herds on reconnect.
     pub fn next_delay(&mut self, rng: &mut impl rand::Rng) -> Duration {
         let exp = 2u32.saturating_pow(self.attempt) as u64;
         let base = self.cfg.initial.as_secs().saturating_mul(exp);
         let capped = base.min(self.cfg.max.as_secs());
-        let jitter_factor = 1.0 + rng.gen_range(0.0..=self.cfg.jitter);
+        let jitter_factor = 1.0 - (self.cfg.jitter / 2.0) + rng.gen_range(0.0..=self.cfg.jitter);
         let jittered = (capped as f64 * jitter_factor).min(self.cfg.max.as_secs() as f64);
         self.attempt = self.attempt.saturating_add(1);
         Duration::from_secs(jittered as u64)
@@ -42,17 +46,18 @@ mod tests {
     use rand::SeedableRng;
 
     #[test]
-    fn first_delay_is_at_least_initial() {
+    fn first_delay_respects_jitter_range() {
         let cfg = BackoffConfig {
-            initial: Duration::from_secs(5),
+            initial: Duration::from_secs(10),
             max: Duration::from_secs(300),
             jitter: 0.5,
         };
         let mut b = Backoff::new(cfg);
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let d = b.next_delay(&mut rng);
-        assert!(d >= Duration::from_secs(5), "got {d:?}");
-        assert!(d <= Duration::from_secs(8), "got {d:?}"); // 5 * (1+0.5)
+        // With jitter=0.5: factor range is [0.75, 1.5], so delay ∈ [7, 15]
+        assert!(d >= Duration::from_secs(7), "got {d:?}");
+        assert!(d <= Duration::from_secs(15), "got {d:?}");
     }
 
     #[test]

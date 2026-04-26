@@ -1,9 +1,8 @@
 //! IMAP client trait + production async-imap implementation (Phase 9) + fake for tests.
 
-use crate::types::{CoreError, MessageContext};
+use crate::types::{parse_headers, CoreError, MessageContext};
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -30,6 +29,10 @@ pub struct MailboxStatus {
 /// Outcome of waiting in IDLE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdleEvent {
+    /// The server pushed an update (EXISTS, RECENT, etc.).
+    /// The count field is always 0 with the current AsyncImapClient implementation;
+    /// the session manager calls process_pending() which fetches all new messages
+    /// regardless of the count.
     Exists(u32),
     Interrupted,
     Disconnected,
@@ -351,26 +354,6 @@ fn flag_to_string(flag: async_imap::types::Flag<'_>) -> String {
     }
 }
 
-fn parse_headers(raw: &[u8]) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::new();
-    let text = String::from_utf8_lossy(raw);
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            headers
-                .entry(name.trim().to_ascii_lowercase())
-                .and_modify(|v: &mut String| {
-                    v.push_str(", ");
-                    v.push_str(value.trim());
-                })
-                .or_insert_with(|| value.trim().to_string());
-        }
-    }
-    headers
-}
-
 #[async_trait]
 impl ImapClient for AsyncImapClient {
     async fn capabilities(&mut self) -> Result<Capabilities, CoreError> {
@@ -536,6 +519,9 @@ impl ImapClient for AsyncImapClient {
         }
 
         match result {
+            // NewData indicates the server pushed an update (typically EXISTS).
+            // The count is not extracted from the response; the session manager
+            // calls process_pending which fetches all new messages regardless.
             Ok(async_imap::extensions::idle::IdleResponse::NewData(_)) => Ok(IdleEvent::Exists(0)),
             Ok(async_imap::extensions::idle::IdleResponse::ManualInterrupt) => {
                 Ok(IdleEvent::Interrupted)

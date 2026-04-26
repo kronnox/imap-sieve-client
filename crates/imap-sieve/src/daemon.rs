@@ -6,8 +6,7 @@ use imap_sieve_core::session::{BackoffConfig, ConnectionFactory, Supervisor, IDL
 use imap_sieve_core::sieve_engine::{SieveEngine, SieveEngineImpl};
 use imap_sieve_core::smtp_sender::LettreMailSender;
 use imap_sieve_core::state::StateStore;
-use imap_sieve_core::types::{CoreError, MessageContext};
-use std::collections::BTreeMap;
+use imap_sieve_core::types::{parse_headers, CoreError, MessageContext};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -191,22 +190,6 @@ fn install_signal_handlers(shutdown: Arc<Notify>) {
         tracing::info!("signal received; initiating shutdown");
         shutdown.notify_one();
     });
-}
-
-fn parse_headers(raw: &[u8]) -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::new();
-    let text = String::from_utf8_lossy(raw);
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            headers
-                .entry(name.trim().to_ascii_lowercase())
-                .or_insert_with(|| value.trim().to_string());
-        }
-    }
-    headers
 }
 
 // === inline ConnectionFactory for AsyncImapClient ===

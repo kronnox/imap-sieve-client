@@ -95,6 +95,56 @@ pub enum CoreError {
     Io(#[from] std::io::Error),
 }
 
+/// Parse RFC 5322 headers from raw email bytes.
+///
+/// Lowercases header names and concatenates duplicate headers with `, `
+/// (per Sieve "header" test semantics). Handles RFC 5322 header field
+/// folding (continuation lines starting with whitespace).
+pub fn parse_headers(raw: &[u8]) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    let text = String::from_utf8_lossy(raw);
+
+    // First pass: unfold continuation lines (RFC 5322 §2.2.3).
+    // A continuation line starts with whitespace; it's appended to the
+    // previous logical line by removing the CRLF + whitespace, replacing
+    // with a single space.
+    let mut unfolded = String::with_capacity(text.len());
+    let mut prev_was_header = false;
+    for line in text.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            // Continuation line — fold into previous header
+            if prev_was_header {
+                unfolded.push(' ');
+                unfolded.push_str(line.trim_start());
+            }
+        } else {
+            unfolded.push('\n');
+            unfolded.push_str(line);
+            prev_was_header = true;
+        }
+    }
+
+    // Second pass: extract name: value pairs
+    for line in unfolded.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers
+                .entry(name.trim().to_ascii_lowercase())
+                .and_modify(|v: &mut String| {
+                    v.push_str(", ");
+                    v.push_str(value.trim());
+                })
+                .or_insert_with(|| value.trim().to_string());
+        }
+    }
+    headers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +168,27 @@ mod tests {
         assert_eq!(ctx.header("SUBJECT"), Some("Hello"));
         assert_eq!(ctx.header("From"), Some("a@b.com"));
         assert_eq!(ctx.header("missing"), None);
+    }
+
+    #[test]
+    fn parse_headers_basic() {
+        let raw = b"Subject: hello\r\nFrom: a@b.com\r\n\r\nbody";
+        let h = parse_headers(raw);
+        assert_eq!(h.get("subject"), Some(&"hello".to_string()));
+        assert_eq!(h.get("from"), Some(&"a@b.com".to_string()));
+    }
+
+    #[test]
+    fn parse_headers_concatenates_duplicates() {
+        let raw = b"Received: by mx1\r\nReceived: from mx2\r\n\r\n";
+        let h = parse_headers(raw);
+        assert_eq!(h.get("received"), Some(&"by mx1, from mx2".to_string()));
+    }
+
+    #[test]
+    fn parse_headers_unfolds_continuation() {
+        let raw = b"Subject: this is\r\n a folded\r\n header\r\n\r\n";
+        let h = parse_headers(raw);
+        assert_eq!(h.get("subject"), Some(&"this is a folded header".to_string()));
     }
 }
