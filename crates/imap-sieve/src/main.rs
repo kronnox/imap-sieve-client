@@ -4,7 +4,11 @@ use std::path::PathBuf;
 mod daemon;
 
 #[derive(Parser)]
-#[command(name = "imap-sieve", version, about = "IMAP daemon that processes mail with Sieve scripts")]
+#[command(
+    name = "imap-sieve",
+    version,
+    about = "IMAP daemon that processes mail with Sieve scripts"
+)]
 struct Cli {
     /// Path to the TOML config file
     #[arg(short, long, default_value = "/etc/imap-sieve/config.toml")]

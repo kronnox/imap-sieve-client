@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use config::Config;
 use imap_sieve_core::imap_client::AsyncImapClient;
 use imap_sieve_core::script_loader::ScriptLoader;
-use imap_sieve_core::session::{BackoffConfig, ConnectionFactory, IDLE_TIMEOUT, Supervisor};
+use imap_sieve_core::session::{BackoffConfig, ConnectionFactory, Supervisor, IDLE_TIMEOUT};
 use imap_sieve_core::sieve_engine::{SieveEngine, SieveEngineImpl};
 use imap_sieve_core::smtp_sender::LettreMailSender;
 use imap_sieve_core::state::StateStore;
@@ -22,9 +22,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
     init_tracing(&cfg.logging.level);
 
     let engine = SieveEngineImpl::new();
-    let (loader, script) =
-        ScriptLoader::load(SieveEngineImpl::new(), &cfg.sieve.script_path)
-            .context("loading sieve script")?;
+    let (loader, script) = ScriptLoader::load(SieveEngineImpl::new(), &cfg.sieve.script_path)
+        .context("loading sieve script")?;
     let _watcher = if cfg.sieve.watch {
         Some(loader.spawn_watcher().context("spawning sieve watcher")?)
     } else {
@@ -112,8 +111,7 @@ pub async fn status(config_path: &Path) -> Result<()> {
 pub async fn check(config_path: &Path) -> Result<()> {
     let cfg = Config::load(config_path)?;
     let engine = SieveEngineImpl::new();
-    let text =
-        std::fs::read_to_string(&cfg.sieve.script_path).context("reading sieve script")?;
+    let text = std::fs::read_to_string(&cfg.sieve.script_path).context("reading sieve script")?;
     engine.compile(&text).context("compiling sieve script")?;
     println!(
         "OK: sieve script at {} compiled cleanly",
@@ -162,9 +160,7 @@ fn state_path(cfg: &Config) -> Result<PathBuf> {
         .or_else(dirs::state_dir)
         .or_else(dirs::data_local_dir)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot determine state directory; set daemon.state_dir in config"
-            )
+            anyhow::anyhow!("cannot determine state directory; set daemon.state_dir in config")
         })?;
     Ok(base.join("imap-sieve").join("state.json"))
 }
@@ -180,10 +176,9 @@ fn install_signal_handlers(shutdown: Arc<Notify>) {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
         {
-            let mut term = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            )
-            .expect("install SIGTERM handler");
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
             tokio::select! {
                 _ = ctrl_c => {}
                 _ = term.recv() => {}

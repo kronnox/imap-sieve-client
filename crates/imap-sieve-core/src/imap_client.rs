@@ -144,7 +144,11 @@ pub mod fake {
         async fn select(&mut self, _: &str) -> Result<MailboxStatus, CoreError> {
             Ok(self.status.clone())
         }
-        async fn fetch_uid_range(&mut self, _: &str, _: u32) -> Result<Vec<MessageContext>, CoreError> {
+        async fn fetch_uid_range(
+            &mut self,
+            _: &str,
+            _: u32,
+        ) -> Result<Vec<MessageContext>, CoreError> {
             Ok(std::mem::take(&mut *self.fetch_responses.lock().unwrap()))
         }
         async fn uid_move(&mut self, uid: u32, target: &str) -> Result<(), CoreError> {
@@ -161,7 +165,10 @@ pub mod fake {
             op: FlagOp,
             flags: &[String],
         ) -> Result<(), CoreError> {
-            self.ops.lock().unwrap().push(Op::Store(uid, op, flags.to_vec()));
+            self.ops
+                .lock()
+                .unwrap()
+                .push(Op::Store(uid, op, flags.to_vec()));
             Ok(())
         }
         async fn uid_expunge(&mut self, uids: &[u32]) -> Result<(), CoreError> {
@@ -185,7 +192,7 @@ pub mod fake {
 /// Wraps either a TLS stream or a plain TCP stream so that both can be stored
 /// behind a single `Session` type.
 enum ImapStream {
-    Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
     Plain(tokio::net::TcpStream),
 }
 
@@ -196,7 +203,7 @@ impl AsyncRead for ImapStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            ImapStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            ImapStream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
             ImapStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -209,21 +216,21 @@ impl AsyncWrite for ImapStream {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
-            ImapStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            ImapStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
             ImapStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            ImapStream::Tls(s) => Pin::new(s).poll_flush(cx),
+            ImapStream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
             ImapStream::Plain(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            ImapStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            ImapStream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
             ImapStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
@@ -246,10 +253,7 @@ impl fmt::Debug for ImapStream {
 // ---------------------------------------------------------------------------
 
 /// Helper to build a TLS stream using `tokio-rustls`.
-async fn tls_connect(
-    tcp: tokio::net::TcpStream,
-    host: &str,
-) -> Result<ImapStream, CoreError> {
+async fn tls_connect(tcp: tokio::net::TcpStream, host: &str) -> Result<ImapStream, CoreError> {
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
@@ -265,7 +269,7 @@ async fn tls_connect(
         .connect(server_name, tcp)
         .await
         .map_err(|e| CoreError::Imap(format!("TLS handshake: {e}")))?;
-    Ok(ImapStream::Tls(tls))
+    Ok(ImapStream::Tls(Box::new(tls)))
 }
 
 /// Production IMAP client wrapping `async-imap`.
@@ -532,15 +536,11 @@ impl ImapClient for AsyncImapClient {
         }
 
         match result {
-            Ok(async_imap::extensions::idle::IdleResponse::NewData(_)) => {
-                Ok(IdleEvent::Exists(0))
-            }
+            Ok(async_imap::extensions::idle::IdleResponse::NewData(_)) => Ok(IdleEvent::Exists(0)),
             Ok(async_imap::extensions::idle::IdleResponse::ManualInterrupt) => {
                 Ok(IdleEvent::Interrupted)
             }
-            Ok(async_imap::extensions::idle::IdleResponse::Timeout) => {
-                Ok(IdleEvent::Interrupted)
-            }
+            Ok(async_imap::extensions::idle::IdleResponse::Timeout) => Ok(IdleEvent::Interrupted),
             Err(e) => Err(CoreError::Imap(format!("idle wait: {e}"))),
         }
     }
@@ -553,17 +553,31 @@ mod tests {
 
     #[tokio::test]
     async fn move_with_fallback_uses_native_move_when_available() {
-        let caps = Capabilities { supports_move: true, uidplus: true, idle: true, ..Default::default() };
+        let caps = Capabilities {
+            supports_move: true,
+            uidplus: true,
+            idle: true,
+            ..Default::default()
+        };
         let mut fake = FakeImap::new().with_caps(caps.clone());
-        move_with_fallback(&mut fake, &caps, 5, "Junk").await.unwrap();
+        move_with_fallback(&mut fake, &caps, 5, "Junk")
+            .await
+            .unwrap();
         assert_eq!(fake.ops(), vec![Op::Move(5, "Junk".into())]);
     }
 
     #[tokio::test]
     async fn move_with_fallback_falls_back_to_copy_store_expunge() {
-        let caps = Capabilities { supports_move: false, uidplus: true, idle: true, ..Default::default() };
+        let caps = Capabilities {
+            supports_move: false,
+            uidplus: true,
+            idle: true,
+            ..Default::default()
+        };
         let mut fake = FakeImap::new().with_caps(caps.clone());
-        move_with_fallback(&mut fake, &caps, 5, "Junk").await.unwrap();
+        move_with_fallback(&mut fake, &caps, 5, "Junk")
+            .await
+            .unwrap();
         assert_eq!(
             fake.ops(),
             vec![
@@ -576,9 +590,16 @@ mod tests {
 
     #[tokio::test]
     async fn move_with_fallback_skips_expunge_without_uidplus() {
-        let caps = Capabilities { supports_move: false, uidplus: false, idle: true, ..Default::default() };
+        let caps = Capabilities {
+            supports_move: false,
+            uidplus: false,
+            idle: true,
+            ..Default::default()
+        };
         let mut fake = FakeImap::new().with_caps(caps.clone());
-        move_with_fallback(&mut fake, &caps, 5, "Junk").await.unwrap();
+        move_with_fallback(&mut fake, &caps, 5, "Junk")
+            .await
+            .unwrap();
         assert_eq!(
             fake.ops(),
             vec![

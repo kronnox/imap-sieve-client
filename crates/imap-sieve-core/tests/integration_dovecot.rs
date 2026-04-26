@@ -2,6 +2,19 @@
 //! `DOVECOT_TEST_HOST` is set.
 
 use imap_sieve_core::imap_client::{AsyncImapClient, ImapClient};
+use imap_sieve_core::smtp_sender::{MailSender, OutgoingMail};
+use imap_sieve_core::types::CoreError;
+use async_trait::async_trait;
+
+/// A no-op mail sender for integration tests that don't need SMTP.
+struct NopMailSender;
+
+#[async_trait]
+impl MailSender for NopMailSender {
+    async fn send(&self, _mail: OutgoingMail) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
 
 fn dovecot_host() -> Option<(String, u16)> {
     let host = std::env::var("DOVECOT_TEST_HOST").ok()?;
@@ -15,7 +28,9 @@ fn dovecot_host() -> Option<(String, u16)> {
 #[tokio::test]
 #[ignore = "requires Dovecot running locally"]
 async fn login_and_select_inbox() {
-    let Some((host, port)) = dovecot_host() else { return };
+    let Some((host, port)) = dovecot_host() else {
+        return;
+    };
     let mut client = AsyncImapClient::connect(&host, port, "testuser", "testpass", false)
         .await
         .expect("connect");
@@ -34,13 +49,14 @@ async fn fileinto_action_moves_message() {
     use imap_sieve_core::state::StateStore;
     use tempfile::TempDir;
 
-    let Some((host, port)) = dovecot_host() else { return };
+    let Some((host, port)) = dovecot_host() else {
+        return;
+    };
 
     // 1. Append a test message via a fresh client
-    let mut client =
-        AsyncImapClient::connect(&host, port, "testuser", "testpass", false)
-            .await
-            .unwrap();
+    let mut client = AsyncImapClient::connect(&host, port, "testuser", "testpass", false)
+        .await
+        .unwrap();
     // Ensure the Junk folder exists (ignore error if it already does):
     let _ = client.session_create_mailbox("Junk").await;
     let test_msg = b"From: a@b.com\r\nTo: c@d.com\r\nSubject: integration spam\r\n\r\nbody\r\n";
@@ -67,11 +83,12 @@ async fn fileinto_action_moves_message() {
         })
         .unwrap();
 
+    let smtp = NopMailSender;
     let mut processor = MessageProcessor {
         engine: &engine,
         script: &script,
         imap: &mut client,
-        smtp: None::<&imap_sieve_core::smtp_sender::fake::FakeSender>,
+        smtp: Some(&smtp),
         caps: &caps,
         state: &mut state,
         mailbox: "INBOX",

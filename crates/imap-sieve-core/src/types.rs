@@ -25,7 +25,9 @@ pub struct MessageContext {
 
 impl MessageContext {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_ascii_lowercase()).map(String::as_str)
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
     }
 }
 
@@ -34,14 +36,30 @@ impl MessageContext {
 pub enum SieveAction {
     Keep,
     Discard,
-    FileInto { mailbox: String, copy: bool },
-    Redirect { addresses: Vec<String> },
-    Reject { reason: String },
-    AddFlag { flags: Vec<String> },
-    RemoveFlag { flags: Vec<String> },
-    SetFlag { flags: Vec<String> },
+    FileInto {
+        mailbox: String,
+        copy: bool,
+    },
+    Redirect {
+        addresses: Vec<String>,
+    },
+    Reject {
+        reason: String,
+    },
+    AddFlag {
+        flags: Vec<String>,
+    },
+    RemoveFlag {
+        flags: Vec<String>,
+    },
+    SetFlag {
+        flags: Vec<String>,
+    },
     /// `execute "name" "arg1" "arg2"` — custom action passthrough.
-    Execute { name: String, args: Vec<String> },
+    Execute {
+        name: String,
+        args: Vec<String>,
+    },
 }
 
 /// Outcome of processing a single message.

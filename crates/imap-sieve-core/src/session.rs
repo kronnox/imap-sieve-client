@@ -43,7 +43,11 @@ mod tests {
 
     #[test]
     fn first_delay_is_at_least_initial() {
-        let cfg = BackoffConfig { initial: Duration::from_secs(5), max: Duration::from_secs(300), jitter: 0.5 };
+        let cfg = BackoffConfig {
+            initial: Duration::from_secs(5),
+            max: Duration::from_secs(300),
+            jitter: 0.5,
+        };
         let mut b = Backoff::new(cfg);
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let d = b.next_delay(&mut rng);
@@ -53,7 +57,11 @@ mod tests {
 
     #[test]
     fn delay_grows_exponentially_then_caps() {
-        let cfg = BackoffConfig { initial: Duration::from_secs(5), max: Duration::from_secs(300), jitter: 0.0 };
+        let cfg = BackoffConfig {
+            initial: Duration::from_secs(5),
+            max: Duration::from_secs(300),
+            jitter: 0.0,
+        };
         let mut b = Backoff::new(cfg);
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         assert_eq!(b.next_delay(&mut rng), Duration::from_secs(5));
@@ -68,7 +76,11 @@ mod tests {
 
     #[test]
     fn reset_returns_to_initial() {
-        let cfg = BackoffConfig { initial: Duration::from_secs(5), max: Duration::from_secs(300), jitter: 0.0 };
+        let cfg = BackoffConfig {
+            initial: Duration::from_secs(5),
+            max: Duration::from_secs(300),
+            jitter: 0.0,
+        };
         let mut b = Backoff::new(cfg);
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let _ = b.next_delay(&mut rng);
@@ -186,7 +198,10 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
         }
     }
 
-    async fn process_pending(&mut self, caps: &crate::imap_client::Capabilities) -> Result<(), CoreError> {
+    async fn process_pending(
+        &mut self,
+        caps: &crate::imap_client::Capabilities,
+    ) -> Result<(), CoreError> {
         let mut processor = MessageProcessor {
             engine: self.engine,
             script: self.script,
@@ -290,7 +305,13 @@ mod session_loop_tests {
             shutdown,
         };
         let err = sm.run().await.unwrap_err();
-        assert!(matches!(err, CoreError::UidValidityChanged { cached: 7, server: 99 }));
+        assert!(matches!(
+            err,
+            CoreError::UidValidityChanged {
+                cached: 7,
+                server: 99
+            }
+        ));
     }
 
     #[tokio::test]
@@ -478,7 +499,10 @@ mod supervisor_tests {
         });
 
         let supervisor = Supervisor {
-            factory: CountingFactory { count: AtomicU32::new(0), fail_first_n: 2 },
+            factory: CountingFactory {
+                count: AtomicU32::new(0),
+                fail_first_n: 2,
+            },
             engine,
             script: handle,
             smtp: Some(smtp),

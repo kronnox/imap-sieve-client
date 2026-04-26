@@ -33,10 +33,7 @@ pub struct ScriptLoader<E: SieveEngine> {
 
 impl<E: SieveEngine> ScriptLoader<E> {
     /// Compile the script at `path` once and return a `ScriptHandle` plus this loader.
-    pub fn load(
-        engine: E,
-        path: impl Into<PathBuf>,
-    ) -> Result<(Self, ScriptHandle), LoaderError> {
+    pub fn load(engine: E, path: impl Into<PathBuf>) -> Result<(Self, ScriptHandle), LoaderError> {
         let path = path.into();
         let text = std::fs::read_to_string(&path)?;
         let compiled = engine.compile(&text)?;
@@ -85,10 +82,10 @@ impl<E: SieveEngine + Send + Sync + 'static> ScriptLoader<E> {
         let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
         watcher
             .watch(&self.path, RecursiveMode::NonRecursive)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let loader = self;
         let thread = std::thread::Builder::new()
@@ -114,7 +111,7 @@ impl<E: SieveEngine + Send + Sync + 'static> ScriptLoader<E> {
                     }
                 }
             })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         Ok(WatcherGuard {
             watcher: Some(watcher),
@@ -167,10 +164,7 @@ mod tests {
         assert!(loader.reload().is_err());
 
         let after = Arc::as_ptr(&handle.current());
-        assert_eq!(
-            original, after,
-            "old script must remain on compile failure"
-        );
+        assert_eq!(original, after, "old script must remain on compile failure");
     }
 
     #[tokio::test]

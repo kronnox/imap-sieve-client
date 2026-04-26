@@ -2,7 +2,10 @@
 
 use crate::types::CoreError;
 use async_trait::async_trait;
-use lettre::{transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use lettre::{
+    transport::smtp::authentication::Credentials, AsyncSmtpTransport, AsyncTransport,
+    Tokio1Executor,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingMail {
@@ -67,8 +70,8 @@ impl MailSender for LettreMailSender {
                     .map_err(|e: lettre::address::AddressError| CoreError::Smtp(e.to_string()))
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
-        let envelope = lettre::address::Envelope::new(from, to)
-            .map_err(|e| CoreError::Smtp(e.to_string()))?;
+        let envelope =
+            lettre::address::Envelope::new(from, to).map_err(|e| CoreError::Smtp(e.to_string()))?;
         self.transport
             .send_raw(&envelope, &mail.raw)
             .await

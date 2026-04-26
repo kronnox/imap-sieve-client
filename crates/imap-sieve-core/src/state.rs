@@ -61,7 +61,8 @@ impl StateStore {
         use std::io::Write;
         tmp.write_all(&bytes)?;
         tmp.as_file_mut().sync_all()?;
-        tmp.persist(&self.path).map_err(|e| StateError::Io(e.error))?;
+        tmp.persist(&self.path)
+            .map_err(|e| StateError::Io(e.error))?;
         Ok(())
     }
 }
@@ -84,12 +85,14 @@ mod tests {
         let path = dir.path().join("state.json");
         {
             let mut store = StateStore::open(&path).unwrap();
-            store.update(|s| {
-                s.selected_mailbox = Some("INBOX".into());
-                s.uidvalidity = Some(42);
-                s.last_seen_uid = Some(100);
-                s.highestmodseq = Some(999);
-            }).unwrap();
+            store
+                .update(|s| {
+                    s.selected_mailbox = Some("INBOX".into());
+                    s.uidvalidity = Some(42);
+                    s.last_seen_uid = Some(100);
+                    s.highestmodseq = Some(999);
+                })
+                .unwrap();
         }
         let store = StateStore::open(&path).unwrap();
         assert_eq!(store.state().selected_mailbox.as_deref(), Some("INBOX"));

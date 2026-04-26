@@ -80,7 +80,10 @@ pub struct LoggingConfig {
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        Self { level: default_log_level(), file: None }
+        Self {
+            level: default_log_level(),
+            file: None,
+        }
     }
 }
 
@@ -97,14 +100,30 @@ pub struct SmtpConfig {
     pub envelope_from: String,
 }
 
-fn default_true() -> bool { true }
-fn default_mailbox() -> String { "INBOX".into() }
-fn default_batch_size() -> usize { 10 }
-fn default_reconnect_delay() -> u64 { 5 }
-fn default_max_reconnect_delay() -> u64 { 300 }
-fn default_reconnect_jitter() -> f64 { 0.5 }
-fn default_log_level() -> String { "info".into() }
-fn default_envelope_from() -> String { String::new() }
+fn default_true() -> bool {
+    true
+}
+fn default_mailbox() -> String {
+    "INBOX".into()
+}
+fn default_batch_size() -> usize {
+    10
+}
+fn default_reconnect_delay() -> u64 {
+    5
+}
+fn default_max_reconnect_delay() -> u64 {
+    300
+}
+fn default_reconnect_jitter() -> f64 {
+    0.5
+}
+fn default_log_level() -> String {
+    "info".into()
+}
+fn default_envelope_from() -> String {
+    String::new()
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -142,7 +161,8 @@ impl Config {
                 "imap.password or imap.password_command required for auth_method = plain".into(),
             ));
         }
-        if matches!(self.imap.auth_method, AuthMethod::Oauth2) && self.imap.token_command.is_none() {
+        if matches!(self.imap.auth_method, AuthMethod::Oauth2) && self.imap.token_command.is_none()
+        {
             return Err(ConfigError::Invalid(
                 "imap.token_command required for auth_method = oauth2".into(),
             ));
@@ -185,7 +205,9 @@ fn resolve_secret(literal: Option<&str>, command: Option<&str>) -> Result<String
     if let Some(cmd) = command {
         return run_secret_command(cmd);
     }
-    Err(ConfigError::Invalid("no secret available (literal or command)".into()))
+    Err(ConfigError::Invalid(
+        "no secret available (literal or command)".into(),
+    ))
 }
 
 fn run_secret_command(cmd: &str) -> Result<String, ConfigError> {
@@ -202,7 +224,9 @@ fn run_secret_command(cmd: &str) -> Result<String, ConfigError> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let secret = String::from_utf8_lossy(&output.stdout).trim_end_matches(['\n', '\r']).to_string();
+    let secret = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
     if secret.is_empty() {
         return Err(ConfigError::PasswordCommand("empty output".into()));
     }
@@ -249,7 +273,10 @@ starttls = true
         assert_eq!(cfg.imap.host, "imap.example.com");
         assert_eq!(cfg.imap.port, 993);
         assert_eq!(cfg.imap.auth_method, AuthMethod::Plain);
-        assert_eq!(cfg.sieve.script_path.to_str().unwrap(), "/etc/imap-sieve/rules.sieve");
+        assert_eq!(
+            cfg.sieve.script_path.to_str().unwrap(),
+            "/etc/imap-sieve/rules.sieve"
+        );
         assert!(cfg.sieve.watch);
         assert_eq!(cfg.daemon.batch_size, 10);
         assert_eq!(cfg.logging.level, "info");

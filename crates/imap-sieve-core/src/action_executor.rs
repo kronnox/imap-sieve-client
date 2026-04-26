@@ -26,13 +26,19 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
         for action in actions {
             match action {
                 SieveAction::AddFlag { flags } => {
-                    self.imap.uid_store_flags(ctx.uid, FlagOp::Add, flags).await?;
+                    self.imap
+                        .uid_store_flags(ctx.uid, FlagOp::Add, flags)
+                        .await?;
                 }
                 SieveAction::RemoveFlag { flags } => {
-                    self.imap.uid_store_flags(ctx.uid, FlagOp::Remove, flags).await?;
+                    self.imap
+                        .uid_store_flags(ctx.uid, FlagOp::Remove, flags)
+                        .await?;
                 }
                 SieveAction::SetFlag { flags } => {
-                    self.imap.uid_store_flags(ctx.uid, FlagOp::Set, flags).await?;
+                    self.imap
+                        .uid_store_flags(ctx.uid, FlagOp::Set, flags)
+                        .await?;
                 }
                 SieveAction::Execute { name, args } => {
                     tracing::info!(action = %name, args = ?args, uid = ctx.uid, "execute action (no handler registered)");
@@ -63,10 +69,7 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
                         CoreError::Smtp("redirect requires raw message body".into())
                     })?;
                     smtp.send(OutgoingMail {
-                        envelope_from: ctx
-                            .envelope_from
-                            .clone()
-                            .unwrap_or_else(|| "<>".into()),
+                        envelope_from: ctx.envelope_from.clone().unwrap_or_else(|| "<>".into()),
                         envelope_to: addresses.clone(),
                         raw: raw.to_vec(),
                     })
@@ -80,9 +83,7 @@ impl<'i, 's, C: ImapClient + ?Sized, S: MailSender + ?Sized> ActionExecutor<'i, 
                         .envelope_from
                         .as_deref()
                         .ok_or_else(|| CoreError::Smtp("reject requires envelope-from".into()))?;
-                    let body = format!(
-                        "Subject: Mail rejected\r\nTo: {to}\r\n\r\n{reason}\r\n"
-                    );
+                    let body = format!("Subject: Mail rejected\r\nTo: {to}\r\n\r\n{reason}\r\n");
                     smtp.send(OutgoingMail {
                         envelope_from: String::new(),
                         envelope_to: vec![to.into()],
@@ -161,7 +162,10 @@ mod tests {
         };
         exec.execute(
             &ctx(7),
-            &[SieveAction::FileInto { mailbox: "Junk".into(), copy: false }],
+            &[SieveAction::FileInto {
+                mailbox: "Junk".into(),
+                copy: false,
+            }],
         )
         .await
         .unwrap();
@@ -179,7 +183,9 @@ mod tests {
             caps: &caps,
             source_mailbox: "INBOX",
         };
-        exec.execute(&ctx(9), &[SieveAction::Discard]).await.unwrap();
+        exec.execute(&ctx(9), &[SieveAction::Discard])
+            .await
+            .unwrap();
         assert_eq!(
             imap.ops(),
             vec![
@@ -202,7 +208,9 @@ mod tests {
         };
         exec.execute(
             &ctx(2),
-            &[SieveAction::Redirect { addresses: vec!["dest@x.com".into()] }],
+            &[SieveAction::Redirect {
+                addresses: vec!["dest@x.com".into()],
+            }],
         )
         .await
         .unwrap();
@@ -224,7 +232,9 @@ mod tests {
         let err = exec
             .execute(
                 &ctx(3),
-                &[SieveAction::Redirect { addresses: vec!["x@y".into()] }],
+                &[SieveAction::Redirect {
+                    addresses: vec!["x@y".into()],
+                }],
             )
             .await
             .unwrap_err();
@@ -244,7 +254,9 @@ mod tests {
         };
         exec.execute(
             &ctx(4),
-            &[SieveAction::AddFlag { flags: vec!["\\Seen".into()] }],
+            &[SieveAction::AddFlag {
+                flags: vec!["\\Seen".into()],
+            }],
         )
         .await
         .unwrap();

@@ -9,7 +9,8 @@ use crate::state::StateStore;
 use crate::types::{CoreError, ProcessingResult, ProcessingStatus, SieveAction};
 
 /// Lifetimes: `'i` for per-iteration `&mut` borrows, `'s` for shared refs.
-pub struct MessageProcessor<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized> {
+pub struct MessageProcessor<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
+{
     pub engine: &'s E,
     pub script: &'s ScriptHandle,
     pub imap: &'i mut C,
@@ -35,7 +36,8 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
             Some(uid) => uid + 1,
             None => {
                 return Err(CoreError::Imap(
-                    "last_seen_uid not initialized; SessionManager must seed it from UIDNEXT".into(),
+                    "last_seen_uid not initialized; SessionManager must seed it from UIDNEXT"
+                        .into(),
                 ));
             }
         };
@@ -49,7 +51,10 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
                 Ok(a) => (a, ProcessingStatus::Ok),
                 Err(e) => {
                     tracing::error!(uid = msg.uid, error = %e, "sieve evaluation failed; falling back to keep");
-                    (vec![SieveAction::Keep], ProcessingStatus::SieveError(e.to_string()))
+                    (
+                        vec![SieveAction::Keep],
+                        ProcessingStatus::SieveError(e.to_string()),
+                    )
                 }
             };
 
@@ -74,7 +79,11 @@ impl<'i, 's, E: SieveEngine, C: ImapClient + ?Sized, S: MailSender + ?Sized>
                 })?;
             }
 
-            results.push(ProcessingResult { uid: msg.uid, actions, status: final_status });
+            results.push(ProcessingResult {
+                uid: msg.uid,
+                actions,
+                status: final_status,
+            });
         }
 
         Ok(results)

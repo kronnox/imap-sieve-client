@@ -102,8 +102,7 @@ impl SieveEngine for SieveEngineImpl {
         let mut actions = Vec::new();
         // Bootstrap with the compiled script, then thread Input::True through
         // subsequent iterations unless an event demands a specific response.
-        let mut next_input: Input =
-            Input::script("main", script.as_sieve().clone());
+        let mut next_input: Input = Input::script("main", script.as_sieve().clone());
 
         loop {
             let event = match instance.run(next_input) {
@@ -127,9 +126,7 @@ impl SieveEngine for SieveEngineImpl {
                     actions.push(SieveAction::Discard);
                     Input::True
                 }
-                Event::FileInto {
-                    folder, create, ..
-                } => {
+                Event::FileInto { folder, create, .. } => {
                     actions.push(SieveAction::FileInto {
                         mailbox: folder,
                         copy: create,
@@ -188,7 +185,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn ctx(subject: &str) -> MessageContext {
-        let raw = format!("Subject: {subject}\r\nFrom: alice@example.com\r\nTo: bob@example.com\r\n\r\nbody");
+        let raw = format!(
+            "Subject: {subject}\r\nFrom: alice@example.com\r\nTo: bob@example.com\r\n\r\nbody"
+        );
         let mut headers = BTreeMap::new();
         headers.insert("subject".into(), subject.into());
         headers.insert("from".into(), "alice@example.com".into());
@@ -223,7 +222,9 @@ if header :contains "Subject" "spam" {
 }
 "#;
         let script = engine.compile(script).expect("compile");
-        let actions = engine.evaluate(&script, &ctx("buy spam now")).expect("eval");
+        let actions = engine
+            .evaluate(&script, &ctx("buy spam now"))
+            .expect("eval");
         assert!(
             actions
                 .iter()
@@ -239,11 +240,7 @@ if header :contains "Subject" "spam" {
         let script = r#"discard;"#;
         let compiled = engine.compile(script).expect("compile");
         let actions = engine.evaluate(&compiled, &ctx("x")).expect("eval");
-        assert!(
-            actions.contains(&SieveAction::Discard),
-            "got {:?}",
-            actions
-        );
+        assert!(actions.contains(&SieveAction::Discard), "got {:?}", actions);
     }
 
     #[test]
